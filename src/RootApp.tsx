@@ -12,6 +12,7 @@ import {
 import {
   ArrowLeft,
   CalendarDays,
+  Bell,
   Check,
   FolderKanban,
   Home as HomeIcon,
@@ -38,6 +39,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  Switch,
   View,
 } from 'react-native';
 
@@ -64,7 +66,13 @@ import {
   demoWorkspaceFolders,
 } from './data/demo';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
-import { cancelLocalReminder, scheduleLocalReminder } from './services/notifications';
+import {
+  cancelLocalReminder,
+  cancelLocalReminders,
+  scheduleLocalReminder,
+  scheduleTaskDeadlineNotifications,
+  type TaskDeadlineNotificationInput,
+} from './services/notifications';
 import { fontFamily, isThemeKey, radius, spacing, themeOptions, typography, type AppColors, type ThemeKey } from './theme/tokens';
 import { ThemeProvider, useTheme } from './theme/theme-context';
 import type { ReceivedWorkspaceInvitation } from './types/database';
@@ -77,6 +85,7 @@ import type {
   SharedNote,
   Task,
   TaskCategory,
+  TaskDeadlineNotificationRule,
   TaskStatus,
   FolderChecklist,
   FolderChecklistItem,
@@ -100,6 +109,7 @@ type TaskCreateInput = {
   checklistItems: string[];
   description: string | null;
   dueAt: string | null;
+  notificationRule: TaskDeadlineNotificationInput | null;
   priority: Priority;
   title: string;
 };
@@ -118,6 +128,171 @@ type SmartPlanDraft = {
 };
 
 type AppStyleBundle = ReturnType<typeof useAppStyles>;
+
+type TaskNotificationOptionKey = 'off' | 'once-30' | 'once-60' | 'once-1440' | 'custom';
+type TaskNotificationUnit = 'minutes' | 'hours' | 'days';
+type TaskNotificationSelection = {
+  customMode: 'once' | 'repeat';
+  customUnit: TaskNotificationUnit;
+  customValue: string;
+  optionKey: TaskNotificationOptionKey;
+};
+
+const taskNotificationPresets: Array<{
+  description: string;
+  key: Exclude<TaskNotificationOptionKey, 'off' | 'custom'>;
+  label: string;
+  rule: TaskDeadlineNotificationInput;
+}> = [
+  {
+    description: 'Um alerta 30 minutos antes.',
+    key: 'once-30',
+    label: '30 minutos antes',
+    rule: { enabled: true, interval_minutes: null, mode: 'once', start_minutes_before: 30 },
+  },
+  {
+    description: 'Um alerta 1 hora antes.',
+    key: 'once-60',
+    label: '1 hora antes',
+    rule: { enabled: true, interval_minutes: null, mode: 'once', start_minutes_before: 60 },
+  },
+  {
+    description: 'Um alerta 1 dia antes.',
+    key: 'once-1440',
+    label: '1 dia antes',
+    rule: { enabled: true, interval_minutes: null, mode: 'once', start_minutes_before: 1440 },
+  },
+];
+
+const defaultTaskNotificationSelection: TaskNotificationSelection = {
+  customMode: 'once',
+  customUnit: 'minutes',
+  customValue: '5',
+  optionKey: 'off',
+};
+
+function getTaskNotificationPresetKey(rule: TaskDeadlineNotificationInput | null | undefined): TaskNotificationOptionKey {
+  if (!rule?.enabled) {
+    return 'off';
+  }
+
+  return (
+    taskNotificationPresets.find((preset) => {
+      if (!preset.rule) {
+        return false;
+      }
+
+      return (
+        preset.rule.mode === rule.mode &&
+        preset.rule.start_minutes_before === rule.start_minutes_before &&
+        preset.rule.interval_minutes === rule.interval_minutes
+      );
+    })?.key ?? 'custom'
+  );
+}
+
+function convertTaskNotificationValueToMinutes(value: string, unit: TaskNotificationUnit) {
+  const trimmedValue = value.trim();
+  if (!/^\d+$/.test(trimmedValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number.parseInt(trimmedValue, 10);
+  if (!Number.isFinite(normalizedValue) || normalizedValue <= 0) {
+    return null;
+  }
+
+  const multiplier = {
+    days: 1440,
+    hours: 60,
+    minutes: 1,
+  }[unit];
+
+  return normalizedValue * multiplier;
+}
+
+function getLargestExactNotificationUnit(minutes: number): Pick<TaskNotificationSelection, 'customUnit' | 'customValue'> {
+  if (minutes % 1440 === 0) {
+    return { customUnit: 'days', customValue: String(minutes / 1440) };
+  }
+
+  if (minutes % 60 === 0) {
+    return { customUnit: 'hours', customValue: String(minutes / 60) };
+  }
+
+  return { customUnit: 'minutes', customValue: String(minutes) };
+}
+
+function buildTaskNotificationSelectionFromRule(
+  rule: TaskDeadlineNotificationInput | null | undefined,
+): TaskNotificationSelection {
+  const optionKey = getTaskNotificationPresetKey(rule);
+  if (optionKey !== 'custom') {
+    return { ...defaultTaskNotificationSelection, optionKey };
+  }
+
+  const sourceMinutes = rule?.mode === 'repeat'
+    ? rule.interval_minutes ?? rule.start_minutes_before
+    : rule?.start_minutes_before ?? 5;
+  const customValue = getLargestExactNotificationUnit(sourceMinutes);
+
+  return {
+    customMode: rule?.mode ?? 'once',
+    customUnit: customValue.customUnit,
+    customValue: customValue.customValue,
+    optionKey: 'custom',
+  };
+}
+
+function buildTaskNotificationRuleFromSelection(
+  selection: TaskNotificationSelection,
+): TaskDeadlineNotificationInput | null {
+  if (selection.optionKey === 'off') {
+    return null;
+  }
+
+  if (selection.optionKey !== 'custom') {
+    return taskNotificationPresets.find((preset) => preset.key === selection.optionKey)?.rule ?? null;
+  }
+
+  const minutes = convertTaskNotificationValueToMinutes(selection.customValue, selection.customUnit);
+  if (!minutes) {
+    return null;
+  }
+
+  return {
+    enabled: true,
+    interval_minutes: selection.customMode === 'repeat' ? minutes : null,
+    mode: selection.customMode,
+    start_minutes_before: minutes,
+  };
+}
+
+function buildTaskNotificationRule(
+  task: Task,
+  rule: TaskDeadlineNotificationInput | null,
+  notificationIds: string[],
+): TaskDeadlineNotificationRule {
+  const now = new Date().toISOString();
+  const normalizedRule = rule ?? {
+    enabled: false,
+    interval_minutes: null,
+    mode: 'once' as const,
+    start_minutes_before: 60,
+  };
+
+  return {
+    id: `task-notification-${task.id}`,
+    task_id: task.id,
+    owner_id: task.owner_id,
+    mode: normalizedRule.mode,
+    start_minutes_before: normalizedRule.start_minutes_before,
+    interval_minutes: normalizedRule.interval_minutes,
+    notification_ids: notificationIds,
+    enabled: normalizedRule.enabled,
+    updated_at: now,
+  };
+}
 
 function buildReceivedInvitations(
   invitations: WorkspaceInvitation[],
@@ -391,6 +566,7 @@ function MainApp({ user }: { user: UserContext }) {
   const [lists, setLists] = useState<SharedList[]>(isSupabaseConfigured ? [] : demoLists);
   const [listItems, setListItems] = useState<SharedListItem[]>(isSupabaseConfigured ? [] : demoListItems);
   const [reminders, setReminders] = useState<Reminder[]>(isSupabaseConfigured ? [] : demoReminders);
+  const [taskNotificationRules, setTaskNotificationRules] = useState<TaskDeadlineNotificationRule[]>([]);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
 
   useEffect(() => {
@@ -415,6 +591,13 @@ function MainApp({ user }: { user: UserContext }) {
         : [],
     [checklistItems, selectedTask],
   );
+  const selectedTaskNotificationRule = useMemo(
+    () =>
+      selectedTask
+        ? taskNotificationRules.find((rule) => rule.task_id === selectedTask.id) ?? null
+        : null,
+    [selectedTask, taskNotificationRules],
+  );
 
   const loadReceivedInvitations = useCallback(async () => {
     if (!supabase) {
@@ -432,9 +615,10 @@ function MainApp({ user }: { user: UserContext }) {
       return;
     }
 
-    const [taskResult, checklistResult] = await Promise.all([
+    const [taskResult, checklistResult, taskNotificationResult] = await Promise.all([
       supabase.from('tasks').select('*').order('due_at', { ascending: true, nullsFirst: false }),
       supabase.from('task_checklist_items').select('*').order('position', { ascending: true }),
+      supabase.from('task_deadline_notifications').select('*'),
     ]);
 
     if (!taskResult.error) {
@@ -442,6 +626,9 @@ function MainApp({ user }: { user: UserContext }) {
     }
     if (!checklistResult.error) {
       setChecklistItems(checklistResult.data ?? []);
+    }
+    if (!taskNotificationResult.error) {
+      setTaskNotificationRules(taskNotificationResult.data ?? []);
     }
   }, []);
 
@@ -509,6 +696,7 @@ function MainApp({ user }: { user: UserContext }) {
       noteResult,
       listResult,
       reminderResult,
+      taskNotificationResult,
     ] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', user.id).maybeSingle(),
       supabase.from('task_categories').select('*').order('position', { ascending: true }),
@@ -526,6 +714,7 @@ function MainApp({ user }: { user: UserContext }) {
       supabase.from('shared_notes').select('*').order('updated_at', { ascending: false }),
       supabase.from('shared_lists').select('*').order('updated_at', { ascending: false }),
       supabase.from('reminders').select('*').order('remind_at', { ascending: true }),
+      supabase.from('task_deadline_notifications').select('*'),
     ]);
 
     if (profileResult.data) {
@@ -578,6 +767,7 @@ function MainApp({ user }: { user: UserContext }) {
     setNotes(noteResult.data ?? []);
     setLists(listResult.data ?? []);
     setReminders(reminderResult.data ?? []);
+    setTaskNotificationRules(taskNotificationResult.data ?? []);
 
     const memberIds = Array.from(
       new Set([
@@ -661,6 +851,7 @@ function MainApp({ user }: { user: UserContext }) {
     const channel = client
       .channel('my-tasks-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, loadTaskContent)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'task_deadline_notifications' }, loadTaskContent)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_categories' }, loadData)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_checklist_items' }, loadTaskContent)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'workspaces' }, loadData)
@@ -717,7 +908,91 @@ function MainApp({ user }: { user: UserContext }) {
     };
   }, [loadData, loadFolderContent, loadReceivedInvitations]);
 
-  const createTask = async ({ categoryId, checklistItems: initialChecklistItems, description, dueAt, priority, title }: TaskCreateInput) => {
+  const persistTaskNotificationRule = async (
+    task: Task,
+    rule: TaskDeadlineNotificationInput | null,
+    previousRule: TaskDeadlineNotificationRule | null = null,
+    areNotificationsEnabled = notificationsEnabled,
+  ) => {
+    await cancelLocalReminders(previousRule?.notification_ids);
+
+    const shouldSchedule = Boolean(rule?.enabled && areNotificationsEnabled && task.status !== 'done');
+    const notificationIds = shouldSchedule
+      ? await scheduleTaskDeadlineNotifications(task.title, task.due_at, rule)
+      : [];
+    const nextRule = buildTaskNotificationRule(task, rule, notificationIds);
+
+    if (!supabase) {
+      setTaskNotificationRules((current) => {
+        const filtered = current.filter((item) => item.task_id !== task.id);
+        return [...filtered, nextRule];
+      });
+      return true;
+    }
+
+    const { data, error } = await supabase
+      .from('task_deadline_notifications')
+      .upsert(
+        {
+          task_id: task.id,
+          owner_id: task.owner_id,
+          mode: nextRule.mode,
+          start_minutes_before: nextRule.start_minutes_before,
+          interval_minutes: nextRule.interval_minutes,
+          notification_ids: nextRule.notification_ids,
+          enabled: nextRule.enabled,
+        },
+        { onConflict: 'task_id' },
+      )
+      .select('*')
+      .single();
+
+    if (error) {
+      await cancelLocalReminders(notificationIds);
+      Alert.alert('Notificacao nao salva', error.message);
+      return false;
+    }
+
+    setTaskNotificationRules((current) => {
+      const filtered = current.filter((item) => item.task_id !== task.id);
+      return data ? [...filtered, data] : [...filtered, nextRule];
+    });
+    return true;
+  };
+
+  const cancelTaskNotificationRule = async (task: Task, rule: TaskDeadlineNotificationRule | null) => {
+    if (!rule) {
+      return;
+    }
+
+    await cancelLocalReminders(rule.notification_ids);
+    const nextRule = { ...rule, notification_ids: [], updated_at: new Date().toISOString() };
+
+    if (!supabase) {
+      setTaskNotificationRules((current) =>
+        current.map((item) => (item.task_id === task.id ? nextRule : item)),
+      );
+      return;
+    }
+
+    const { error } = await supabase
+      .from('task_deadline_notifications')
+      .update({ notification_ids: [] })
+      .eq('task_id', task.id);
+    if (error) {
+      Alert.alert('Erro ao cancelar notificacoes', error.message);
+    }
+  };
+
+  const rescheduleTaskNotificationRule = async (task: Task, rule: TaskDeadlineNotificationRule | null) => {
+    if (!rule?.enabled) {
+      return;
+    }
+
+    await persistTaskNotificationRule(task, rule, rule);
+  };
+
+  const createTask = async ({ categoryId, checklistItems: initialChecklistItems, description, dueAt, notificationRule, priority, title }: TaskCreateInput) => {
     if (!title.trim()) {
       return false;
     }
@@ -738,6 +1013,9 @@ function MainApp({ user }: { user: UserContext }) {
         updated_at: new Date().toISOString(),
       };
       setTasks((current) => [nextTask, ...current]);
+      if (notificationRule?.enabled) {
+        await persistTaskNotificationRule(nextTask, notificationRule);
+      }
       if (normalizedChecklistItems.length) {
         setChecklistItems((current) => [
           ...current,
@@ -778,6 +1056,9 @@ function MainApp({ user }: { user: UserContext }) {
     }
 
     setTasks((current) => mergeTasksById(current, [data]));
+    if (notificationRule?.enabled) {
+      await persistTaskNotificationRule(data, notificationRule);
+    }
 
     if (normalizedChecklistItems.length) {
       const checklistResult = await supabase
@@ -804,18 +1085,43 @@ function MainApp({ user }: { user: UserContext }) {
   };
 
   const updateTaskStatus = async (task: Task, status: TaskStatus) => {
-    if (!supabase) {
+    const existingRule = taskNotificationRules.find((rule) => rule.task_id === task.id) ?? null;
+    const updatedAt = new Date().toISOString();
+    const nextTask = { ...task, status, updated_at: updatedAt };
+    const updateTaskLocally = () => {
       setTasks((current) =>
         current.map((item) =>
-          item.id === task.id ? { ...item, status, updated_at: new Date().toISOString() } : item,
+          item.id === task.id ? nextTask : item,
         ),
       );
+    };
+
+    if (!supabase) {
+      updateTaskLocally();
+      if (status === 'done') {
+        await cancelTaskNotificationRule(task, existingRule);
+      } else {
+        await rescheduleTaskNotificationRule(nextTask, existingRule);
+      }
       return;
     }
 
+    updateTaskLocally();
     const { error } = await supabase.from('tasks').update({ status }).eq('id', task.id);
     if (error) {
+      setTasks((current) =>
+        current.map((item) =>
+          item.id === task.id ? task : item,
+        ),
+      );
       Alert.alert('Erro ao atualizar tarefa', error.message);
+      return;
+    }
+
+    if (status === 'done') {
+      await cancelTaskNotificationRule(task, existingRule);
+    } else {
+      await rescheduleTaskNotificationRule(nextTask, existingRule);
     }
   };
 
@@ -827,7 +1133,10 @@ function MainApp({ user }: { user: UserContext }) {
     const removeTaskLocally = () => {
       setTasks((current) => current.filter((item) => item.id !== task.id));
       setChecklistItems((current) => current.filter((item) => item.task_id !== task.id));
+      setTaskNotificationRules((current) => current.filter((item) => item.task_id !== task.id));
     };
+    const existingRule = taskNotificationRules.find((rule) => rule.task_id === task.id) ?? null;
+    await cancelLocalReminders(existingRule?.notification_ids);
 
     if (!supabase) {
       removeTaskLocally();
@@ -841,6 +1150,15 @@ function MainApp({ user }: { user: UserContext }) {
     }
 
     removeTaskLocally();
+  };
+
+  const updateTaskNotificationSelection = async (task: Task, selection: TaskNotificationSelection) => {
+    const existingRule = taskNotificationRules.find((rule) => rule.task_id === task.id) ?? null;
+    const nextRule = buildTaskNotificationRuleFromSelection(selection);
+    const didSave = await persistTaskNotificationRule(task, nextRule, existingRule);
+    if (didSave && Platform.OS === 'web' && nextRule?.enabled) {
+      Alert.alert('Notificacao configurada', 'Os alertas locais sao aplicados em iOS e Android.');
+    }
   };
 
   const addChecklistItem = async (task: Task, title: string) => {
@@ -1736,6 +2054,21 @@ function MainApp({ user }: { user: UserContext }) {
   const toggleNotifications = async (enabled: boolean) => {
     setNotificationsEnabled(enabled);
 
+    if (!enabled) {
+      await Promise.all(taskNotificationRules.map((rule) => cancelLocalReminders(rule.notification_ids)));
+      setTaskNotificationRules((current) =>
+        current.map((rule) => ({ ...rule, notification_ids: [], updated_at: new Date().toISOString() })),
+      );
+    } else {
+      const openTasksById = new Map(tasks.filter((task) => task.status !== 'done').map((task) => [task.id, task]));
+      for (const rule of taskNotificationRules) {
+        const task = openTasksById.get(rule.task_id);
+        if (task && rule.enabled) {
+          await persistTaskNotificationRule(task, rule, rule, true);
+        }
+      }
+    }
+
     if (!supabase) {
       return;
     }
@@ -1743,6 +2076,16 @@ function MainApp({ user }: { user: UserContext }) {
     const { error } = await supabase.from('profiles').update({ notifications_enabled: enabled }).eq('id', user.id);
     if (error) {
       Alert.alert('Erro ao salvar preferencia', error.message);
+    }
+
+    if (!enabled) {
+      const clearResult = await supabase
+        .from('task_deadline_notifications')
+        .update({ notification_ids: [] })
+        .eq('owner_id', user.id);
+      if (clearResult.error) {
+        Alert.alert('Notificacoes canceladas neste aparelho', `Nao foi possivel sincronizar os IDs agora: ${clearResult.error.message}`);
+      }
     }
   };
 
@@ -1903,6 +2246,8 @@ function MainApp({ user }: { user: UserContext }) {
             onBack={() => setActiveTab(lastMainTab)}
             onSignOut={signOut}
             themeKey={themeKey}
+            notificationsEnabled={notificationsEnabled}
+            toggleNotifications={toggleNotifications}
             updateProfileTheme={updateProfileTheme}
             updateProfileName={updateProfileName}
             user={effectiveUser}
@@ -1933,9 +2278,11 @@ function MainApp({ user }: { user: UserContext }) {
         deleteTask={deleteTask}
         isVisible={Boolean(selectedTask)}
         onClose={() => setSelectedTaskId(null)}
+        notificationRule={selectedTaskNotificationRule}
         task={selectedTask}
         toggleChecklistItem={toggleChecklistItem}
         toggleTaskDone={toggleTaskDone}
+        updateTaskNotificationSelection={updateTaskNotificationSelection}
       />
 
       <TabBar activeTab={activeTab} onChange={changeMainTab} />
@@ -2330,6 +2677,9 @@ function TaskCreateModal({
   const [categoryId, setCategoryId] = useState<string | null>(categories[0]?.id ?? null);
   const [checklistTitle, setChecklistTitle] = useState('');
   const [draftChecklistItems, setDraftChecklistItems] = useState<string[]>([]);
+  const [notificationSelection, setNotificationSelection] = useState<TaskNotificationSelection>(
+    defaultTaskNotificationSelection,
+  );
 
   useEffect(() => {
     if (!categoryId && categories.length) {
@@ -2348,6 +2698,7 @@ function TaskCreateModal({
     setCategoryId(categories[0]?.id ?? null);
     setChecklistTitle('');
     setDraftChecklistItems([]);
+    setNotificationSelection(defaultTaskNotificationSelection);
   };
 
   const addDraftChecklistItem = () => {
@@ -2468,6 +2819,10 @@ function TaskCreateModal({
       checklistItems: normalizedChecklistItems,
       description: description.trim() || null,
       dueAt: buildTaskDueAt(selectedDueDate, hasDueTime),
+      notificationRule:
+        selectedDueDate && hasDueTime
+          ? buildTaskNotificationRuleFromSelection(notificationSelection)
+          : null,
       priority,
       title: title.trim(),
     });
@@ -2567,6 +2922,18 @@ function TaskCreateModal({
                 </View>
               ) : null}
             </View>
+            {selectedDueDate && hasDueTime ? (
+              <View style={styles.modalFieldGroup}>
+                <Text style={styles.modalLabel}>Notificacoes do prazo</Text>
+                <TaskNotificationPresetPicker
+                  onChange={setNotificationSelection}
+                  value={notificationSelection}
+                />
+                {Platform.OS === 'web' ? (
+                  <Text style={styles.dueSummary}>Alertas locais aparecem em iOS e Android.</Text>
+                ) : null}
+              </View>
+            ) : null}
             {visiblePicker && Platform.OS === 'ios' ? (
               <Modal animationType="fade" onRequestClose={cancelPicker} transparent visible>
                 <Pressable
@@ -2709,26 +3076,34 @@ function TaskDetailModal({
   checklistItems,
   deleteTask,
   isVisible,
+  notificationRule,
   onClose,
   task,
   toggleChecklistItem,
   toggleTaskDone,
+  updateTaskNotificationSelection,
 }: {
   addChecklistItem: (task: Task, title: string) => Promise<void>;
   checklistItems: ChecklistItem[];
   deleteTask: (task: Task) => Promise<void>;
   isVisible: boolean;
+  notificationRule: TaskDeadlineNotificationRule | null;
   onClose: () => void;
   task: Task | null;
   toggleChecklistItem: (item: ChecklistItem) => Promise<void>;
   toggleTaskDone: (task: Task) => Promise<void>;
+  updateTaskNotificationSelection: (task: Task, selection: TaskNotificationSelection) => Promise<void>;
 }) {
   const { colors, styles, textStyles } = useAppStyles();
   const [checkTitle, setCheckTitle] = useState('');
+  const [notificationSelection, setNotificationSelection] = useState<TaskNotificationSelection>(
+    defaultTaskNotificationSelection,
+  );
 
   useEffect(() => {
     setCheckTitle('');
-  }, [task?.id]);
+    setNotificationSelection(buildTaskNotificationSelectionFromRule(notificationRule));
+  }, [isVisible, notificationRule?.id, task?.id]);
 
   if (!task) {
     return null;
@@ -2736,6 +3111,7 @@ function TaskDetailModal({
 
   const isDone = task.status === 'done';
   const checklistDone = checklistItems.filter((item) => item.is_done).length;
+  const activeNotificationRule = buildTaskNotificationRuleFromSelection(notificationSelection);
 
   const submitChecklist = async () => {
     if (!checkTitle.trim()) {
@@ -2744,6 +3120,11 @@ function TaskDetailModal({
 
     await addChecklistItem(task, checkTitle);
     setCheckTitle('');
+  };
+
+  const changeNotificationSelection = async (selection: TaskNotificationSelection) => {
+    setNotificationSelection(selection);
+    await updateTaskNotificationSelection(task, selection);
   };
 
   return (
@@ -2778,6 +3159,27 @@ function TaskDetailModal({
             <Button onPress={() => confirmDeleteTask(task, deleteTask)} variant="danger">
               Excluir tarefa
             </Button>
+
+            {task.due_at ? (
+              <View style={styles.taskDetailSection}>
+                <View style={styles.rowBetween}>
+                  <Text style={styles.modalLabel}>Notificacoes do prazo</Text>
+                  <Pill tone={activeNotificationRule?.enabled && !isDone ? 'blue' : 'neutral'}>
+                    {activeNotificationRule?.enabled && !isDone ? 'Ativo' : 'Desativado'}
+                  </Pill>
+                </View>
+                <TaskNotificationPresetPicker
+                  disabled={isDone}
+                  onChange={changeNotificationSelection}
+                  value={notificationSelection}
+                />
+                {isDone ? (
+                  <Text style={styles.dueSummary}>Tarefas concluidas nao mantem alertas agendados.</Text>
+                ) : Platform.OS === 'web' ? (
+                  <Text style={styles.dueSummary}>Alertas locais aparecem em iOS e Android.</Text>
+                ) : null}
+              </View>
+            ) : null}
 
             <View style={styles.taskDetailSection}>
               <View style={styles.rowBetween}>
@@ -2821,16 +3223,20 @@ function TaskDetailModal({
 }
 
 function ProfileScreen({
+  notificationsEnabled,
   onBack,
   onSignOut,
   themeKey,
+  toggleNotifications,
   updateProfileTheme,
   updateProfileName,
   user,
 }: {
+  notificationsEnabled: boolean;
   onBack: () => void;
   onSignOut: () => Promise<void>;
   themeKey: ThemeKey;
+  toggleNotifications: (enabled: boolean) => Promise<void>;
   updateProfileTheme: (themeKey: ThemeKey) => Promise<void>;
   updateProfileName: (name: string) => Promise<void>;
   user: UserContext;
@@ -2937,6 +3343,25 @@ function ProfileScreen({
               </Pressable>
             );
           })}
+        </View>
+      </Card>
+
+      <Card>
+        <View style={styles.profileNameRow}>
+          <View style={styles.flex}>
+            <Text style={styles.profileName}>Notificacoes</Text>
+            <Text style={textStyles.muted}>
+              Controla os alertas locais de lembretes e prazos neste dispositivo.
+            </Text>
+          </View>
+          <Switch
+            onValueChange={(enabled) => {
+              void toggleNotifications(enabled);
+            }}
+            thumbColor={notificationsEnabled ? colors.primary : colors.surface}
+            trackColor={{ false: colors.border, true: colors.primarySoft }}
+            value={notificationsEnabled}
+          />
         </View>
       </Card>
 
@@ -3925,10 +4350,12 @@ function CalendarScreen({
 }
 
 function SegmentedControl({
+  disabled,
   onChange,
   options,
   value,
 }: {
+  disabled?: boolean;
   onChange: (value: string) => void;
   options: Array<[string, string]>;
   value: string;
@@ -3939,15 +4366,126 @@ function SegmentedControl({
     <View style={styles.segmented}>
       {options.map(([optionValue, label]) => (
         <Pressable
+          disabled={disabled}
           key={optionValue}
           onPress={() => onChange(optionValue)}
-          style={[styles.segment, value === optionValue && styles.activeSegment]}
+          style={[styles.segment, value === optionValue && styles.activeSegment, disabled && styles.disabledPanel]}
         >
           <Text style={[styles.segmentText, value === optionValue && styles.activeSegmentText]}>{label}</Text>
         </Pressable>
       ))}
     </View>
   );
+}
+
+function TaskNotificationPresetPicker({
+  disabled,
+  onChange,
+  value,
+}: {
+  disabled?: boolean;
+  onChange: (value: TaskNotificationSelection) => void;
+  value: TaskNotificationSelection;
+}) {
+  const { colors, styles } = useAppStyles();
+  const options: Array<{
+    description: string;
+    key: TaskNotificationOptionKey;
+    label: string;
+  }> = [
+    { description: 'Sem alerta para esta tarefa.', key: 'off', label: 'Desativado' },
+    ...taskNotificationPresets.map((preset) => ({
+      description: preset.description,
+      key: preset.key,
+      label: preset.label,
+    })),
+    { description: 'Escolha valor, unidade e tipo de lembrete.', key: 'custom', label: 'Personalizado' },
+  ];
+
+  const updateSelection = (patch: Partial<TaskNotificationSelection>) => {
+    onChange({ ...value, ...patch });
+  };
+
+  return (
+    <View style={styles.notificationPresetGrid}>
+      {options.map((option) => {
+        const isActive = option.key === value.optionKey;
+
+        return (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled, selected: isActive }}
+            disabled={disabled}
+            key={option.key}
+            onPress={() => updateSelection({ optionKey: option.key })}
+            style={({ pressed }) => [
+              styles.notificationPreset,
+              isActive && styles.notificationPresetActive,
+              disabled && styles.disabledPanel,
+              pressed && !disabled && styles.pressed,
+            ]}
+          >
+            <Bell color={isActive ? colors.primary : colors.muted} size={17} strokeWidth={2.4} />
+            <View style={styles.flex}>
+              <Text style={[styles.notificationPresetTitle, isActive && styles.notificationPresetTitleActive]}>
+                {option.label}
+              </Text>
+              <Text style={styles.notificationPresetDescription}>{option.description}</Text>
+            </View>
+          </Pressable>
+        );
+      })}
+      {value.optionKey === 'custom' ? (
+        <View style={styles.customNotificationPanel}>
+          <SegmentedControl
+            disabled={disabled}
+            options={[
+              ['once', 'Unico'],
+              ['repeat', 'Repetir'],
+            ]}
+            value={value.customMode}
+            onChange={(mode) => updateSelection({ customMode: mode as TaskNotificationSelection['customMode'] })}
+          />
+          <View style={styles.customNotificationRow}>
+            <Text style={styles.notificationPresetDescription}>
+              {value.customMode === 'repeat' ? 'Lembrete a cada' : 'Lembrete'}
+            </Text>
+            <Field
+              editable={!disabled}
+              keyboardType="number-pad"
+              onChangeText={(customValue) => updateSelection({ customValue })}
+              placeholder="5"
+              style={styles.customNotificationValueField}
+              value={value.customValue}
+            />
+          </View>
+          <SegmentedControl
+            disabled={disabled}
+            options={[
+              ['minutes', 'Minutos'],
+              ['hours', 'Horas'],
+              ['days', 'Dias'],
+            ]}
+            value={value.customUnit}
+            onChange={(unit) => updateSelection({ customUnit: unit as TaskNotificationUnit })}
+          />
+          <Text style={styles.dueSummary}>
+            {value.customMode === 'repeat'
+              ? `Lembrete a cada ${value.customValue || '...'} ${getTaskNotificationUnitLabel(value.customUnit)}.`
+              : `Lembrete ${value.customValue || '...'} ${getTaskNotificationUnitLabel(value.customUnit)} antes.`}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function getTaskNotificationUnitLabel(unit: TaskNotificationUnit) {
+  return {
+    days: 'dias',
+    hours: 'horas',
+    minutes: 'minutos',
+  }[unit];
 }
 
 function formatDate(value: string) {
@@ -5938,6 +6476,61 @@ function makeStyles(colors: AppColors) {
   },
   activeSegmentText: {
     color: colors.primary,
+  },
+  notificationPresetGrid: {
+    gap: spacing.sm,
+  },
+  notificationPreset: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 62,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  notificationPresetActive: {
+    backgroundColor: colors.primarySoft,
+    borderColor: colors.primary,
+  },
+  notificationPresetTitle: {
+    color: colors.text,
+    fontFamily: fontFamily.extraBold,
+    fontSize: typography.small,
+    fontWeight: '800',
+  },
+  notificationPresetTitleActive: {
+    color: colors.primary,
+  },
+  notificationPresetDescription: {
+    color: colors.muted,
+    fontFamily: fontFamily.regular,
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: spacing.xs,
+  },
+  customNotificationPanel: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    gap: spacing.sm,
+    padding: spacing.md,
+  },
+  customNotificationRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  customNotificationValueField: {
+    flex: 1,
+    minWidth: 90,
+  },
+  disabledPanel: {
+    opacity: 0.55,
   },
   itemBlock: {
     borderColor: colors.border,

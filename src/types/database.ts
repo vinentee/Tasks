@@ -6,6 +6,7 @@ import type {
   SharedNote,
   Task,
   TaskCategory,
+  TaskDeadlineNotificationRule,
   FolderMember,
   FolderChecklist,
   FolderChecklistItem,
@@ -59,6 +60,10 @@ export type Database = {
         Partial<TaskCategory> & Pick<TaskCategory, 'owner_id' | 'name'>
       >;
       tasks: Table<Task, Partial<Task> & Pick<Task, 'title' | 'owner_id'>>;
+      task_deadline_notifications: Table<
+        TaskDeadlineNotificationRule,
+        Partial<TaskDeadlineNotificationRule> & Pick<TaskDeadlineNotificationRule, 'task_id' | 'owner_id' | 'mode' | 'start_minutes_before'>
+      >;
       task_checklist_items: Table<
         ChecklistItem,
         Partial<ChecklistItem> & Pick<ChecklistItem, 'task_id' | 'title'>

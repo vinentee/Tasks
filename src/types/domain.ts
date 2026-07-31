@@ -1,5 +1,6 @@
 export type Priority = 'low' | 'medium' | 'high' | 'urgent';
 export type TaskStatus = 'todo' | 'doing' | 'done';
+export type TaskNotificationMode = 'once' | 'repeat';
 export type WorkspaceRole = 'owner' | 'member';
 
 export type TaskCategory = {
@@ -30,6 +31,19 @@ export type ChecklistItem = {
   title: string;
   is_done: boolean;
   position: number;
+};
+
+export type TaskDeadlineNotificationRule = {
+  id: string;
+  task_id: string;
+  owner_id: string;
+  mode: TaskNotificationMode;
+  start_minutes_before: number;
+  interval_minutes: number | null;
+  notification_ids: string[];
+  enabled: boolean;
+  created_at?: string;
+  updated_at: string;
 };
 
 export type Workspace = {
