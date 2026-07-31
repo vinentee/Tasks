@@ -235,7 +235,38 @@ export const demoFolderChecklistItems: FolderChecklistItem[] = [
   },
 ];
 
-export const demoFolderSections: FolderSection[] = [];
+export const demoFolderSections: FolderSection[] = [
+  {
+    id: 'section-trip-summary',
+    folder_id: 'folder-trip',
+    kind: 'text',
+    title: 'Resumo executivo',
+    body: 'Viagem para o Japao com foco em Toquio, Quioto e Osaka. O plano combina reservas, documentos, roteiro por regiao e decisoes compartilhadas.',
+    media_url: null,
+    position: 1,
+    updated_at: now,
+  },
+  {
+    id: 'section-trip-map',
+    folder_id: 'folder-trip',
+    kind: 'map',
+    title: 'Roteiro sugerido',
+    body: 'Base em Toquio nos primeiros dias, deslocamento para Quioto e fechamento em Osaka. Agrupe passeios por proximidade para reduzir tempo de transporte.',
+    media_url: null,
+    position: 2,
+    updated_at: now,
+  },
+  {
+    id: 'section-trip-budget',
+    folder_id: 'folder-trip',
+    kind: 'budget',
+    title: 'Orcamento estimado',
+    body: 'Orcamento total: R$ 12.000\nPassagens: 35%\nHospedagem: 30%\nAlimentacao: 15%\nPasseios e transporte: 15%\nReserva de seguranca: 5%',
+    media_url: null,
+    position: 3,
+    updated_at: now,
+  },
+];
 
 export const demoFolderFiles: FolderFile[] = [
   {

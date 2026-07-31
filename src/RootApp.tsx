@@ -17,9 +17,12 @@ import {
   Home as HomeIcon,
   ListTodo,
   LogOut,
+  MapPin,
   Pencil,
   Plus,
+  Sparkles,
   UserRound,
+  WalletCards,
   type LucideIcon,
 } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -99,6 +102,19 @@ type TaskCreateInput = {
   dueAt: string | null;
   priority: Priority;
   title: string;
+};
+type SmartPlanChecklistItem = {
+  assignedLabel: string | null;
+  title: string;
+};
+type SmartPlanSectionDraft = Pick<FolderSection, 'kind' | 'title' | 'body' | 'media_url'>;
+type SmartPlanDraft = {
+  checklistItems: SmartPlanChecklistItem[];
+  checklistTitle: string;
+  description: string;
+  folderName: string;
+  reminders: Array<{ remindAt: string; title: string }>;
+  sections: SmartPlanSectionDraft[];
 };
 
 type AppStyleBundle = ReturnType<typeof useAppStyles>;
@@ -1219,6 +1235,199 @@ function MainApp({ user }: { user: UserContext }) {
     }
   };
 
+  const createSmartPlan = async (prompt: string) => {
+    const draft = buildSmartPlanDraft(prompt);
+    if (!draft) {
+      Alert.alert('Assistente de planejamento', 'Descreva o plano com um pouco mais de contexto.');
+      return null;
+    }
+
+    if (!supabase) {
+      const now = Date.now();
+      const workspaceId = selectedWorkspace?.id ?? `workspace-${user.id}`;
+      const folder: WorkspaceFolder = {
+        id: `folder-smart-${now}`,
+        workspace_id: workspaceId,
+        name: draft.folderName,
+        description: draft.description,
+        position: workspaceFolders.filter((item) => item.workspace_id === workspaceId).length + 1,
+        updated_at: new Date().toISOString(),
+      };
+      const checklist: FolderChecklist = {
+        id: `folder-checklist-smart-${now}`,
+        folder_id: folder.id,
+        title: draft.checklistTitle,
+        position: 1,
+        updated_at: new Date().toISOString(),
+      };
+
+      setWorkspaceFolders((current) =>
+        [...current, folder].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)),
+      );
+      setFolderMembers((current) => [
+        ...current,
+        {
+          folder_id: folder.id,
+          user_id: user.id,
+          role: 'owner',
+          created_at: new Date().toISOString(),
+        },
+      ]);
+      setFolderChecklists((current) => [...current, checklist]);
+      setFolderChecklistItems((current) => [
+        ...current,
+        ...draft.checklistItems.map((item, index) => ({
+          id: `folder-item-smart-${now}-${index}`,
+          checklist_id: checklist.id,
+          title: item.title,
+          is_done: false,
+          position: index + 1,
+          assigned_label: item.assignedLabel,
+        })),
+      ]);
+      setFolderSections((current) => [
+        ...current,
+        ...draft.sections.map((section, index) => ({
+          id: `folder-section-smart-${now}-${index}`,
+          folder_id: folder.id,
+          kind: section.kind,
+          title: section.title,
+          body: section.body,
+          media_url: section.media_url,
+          position: index + 1,
+          updated_at: new Date().toISOString(),
+        })),
+      ]);
+      if (draft.reminders.length) {
+        setReminders((current) => [
+          ...draft.reminders.map((reminder, index) => ({
+            id: `reminder-smart-${now}-${index}`,
+            owner_id: user.id,
+            workspace_id: workspaceId,
+            title: reminder.title,
+            remind_at: reminder.remindAt,
+            notification_id: null,
+            is_done: false,
+          })),
+          ...current,
+        ]);
+      }
+
+      return folder;
+    }
+
+    const { data: folder, error: folderError } = await supabase.rpc('create_folder', {
+      folder_name: draft.folderName,
+    });
+
+    if (folderError || !folder) {
+      Alert.alert('Erro ao criar plano', folderError?.message ?? 'O Supabase nao retornou a pasta criada.');
+      return null;
+    }
+
+    const { error: folderUpdateError } = await supabase
+      .from('workspace_folders')
+      .update({ description: draft.description })
+      .eq('id', folder.id);
+    if (folderUpdateError) {
+      Alert.alert('Plano criado', `A pasta foi criada, mas a descricao nao foi salva: ${folderUpdateError.message}`);
+    }
+
+    let targetChecklist: FolderChecklist | null = null;
+    const checklistResult = await supabase
+      .from('folder_checklists')
+      .select('*')
+      .eq('folder_id', folder.id)
+      .order('position', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (checklistResult.data) {
+      targetChecklist = checklistResult.data;
+      await supabase.from('folder_checklists').update({ title: draft.checklistTitle }).eq('id', targetChecklist.id);
+      targetChecklist = { ...targetChecklist, title: draft.checklistTitle };
+    } else {
+      const createdChecklistResult = await supabase
+        .from('folder_checklists')
+        .insert({ folder_id: folder.id, title: draft.checklistTitle, position: 1 })
+        .select('*')
+        .single();
+
+      if (createdChecklistResult.error || !createdChecklistResult.data) {
+        Alert.alert('Plano criado', createdChecklistResult.error?.message ?? 'Nao foi possivel criar o checklist.');
+      } else {
+        targetChecklist = createdChecklistResult.data;
+      }
+    }
+
+    if (targetChecklist && draft.checklistItems.length) {
+      const itemResult = await supabase.from('folder_checklist_items').insert(
+        draft.checklistItems.map((item, index) => ({
+          checklist_id: targetChecklist.id,
+          title: item.title,
+          assigned_label: item.assignedLabel,
+          position: index + 1,
+        })),
+      ).select('*');
+
+      if (itemResult.error) {
+        Alert.alert('Plano criado', `O checklist inicial nao foi salvo: ${itemResult.error.message}`);
+      } else if (itemResult.data?.length) {
+        setFolderChecklistItems((current) => [...current, ...(itemResult.data ?? [])]);
+      }
+    }
+
+    const sectionResult = await supabase.from('folder_sections').insert(
+      draft.sections.map((section, index) => ({
+        folder_id: folder.id,
+        kind: section.kind,
+        title: section.title,
+        body: section.body,
+        media_url: section.media_url,
+        position: index + 1,
+      })),
+    ).select('*');
+
+    if (sectionResult.error) {
+      Alert.alert('Plano criado', `As secoes inteligentes nao foram salvas: ${sectionResult.error.message}`);
+    } else if (sectionResult.data?.length) {
+      setFolderSections((current) => [...current, ...(sectionResult.data ?? [])]);
+    }
+
+    if (draft.reminders.length) {
+      const reminderResult = await supabase.from('reminders').insert(
+        draft.reminders.map((reminder) => ({
+          owner_id: user.id,
+          workspace_id: folder.workspace_id,
+          title: reminder.title,
+          remind_at: reminder.remindAt,
+          notification_id: null,
+        })),
+      );
+
+      if (reminderResult.error) {
+        Alert.alert('Plano criado', `Os lembretes sugeridos nao foram salvos: ${reminderResult.error.message}`);
+      }
+    }
+
+    const nextFolder = { ...folder, description: draft.description };
+    setWorkspaceFolders((current) =>
+      current.some((item) => item.id === nextFolder.id)
+        ? current.map((item) => (item.id === nextFolder.id ? nextFolder : item))
+        : [...current, nextFolder].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)),
+    );
+    if (targetChecklist) {
+      const syncedChecklist = targetChecklist;
+      setFolderChecklists((current) =>
+        current.some((item) => item.id === syncedChecklist.id)
+          ? current.map((item) => (item.id === syncedChecklist.id ? syncedChecklist : item))
+          : [...current, syncedChecklist],
+      );
+    }
+    await loadData();
+    return nextFolder;
+  };
+
   const deleteWorkspaceFolder = async (folder: WorkspaceFolder) => {
     const removeFolderLocally = () => {
       const checklistIds = folderChecklists
@@ -1651,12 +1860,14 @@ function MainApp({ user }: { user: UserContext }) {
             addFolderComment={addFolderComment}
             attachFolderFile={attachFolderFile}
             createWorkspaceFolder={createWorkspaceFolder}
+            createSmartPlan={createSmartPlan}
             deleteWorkspaceFolder={deleteWorkspaceFolder}
             folderMembers={folderMembers}
             folderChecklistItems={folderChecklistItems}
             folderChecklists={folderChecklists}
             folderComments={folderComments}
             folderFiles={folderFiles}
+            folderSections={folderSections}
             inviteMember={inviteMember}
             invitations={invitations}
             receivedInvitations={receivedInvitations}
@@ -2768,6 +2979,7 @@ function CollaborationScreen({
   addFolderComment,
   attachFolderFile,
   createWorkspaceFolder,
+  createSmartPlan,
   deleteWorkspaceFolder,
   deleteFolderChecklistItem,
   deleteFolderNote,
@@ -2776,6 +2988,7 @@ function CollaborationScreen({
   folderChecklists,
   folderComments,
   folderFiles,
+  folderSections,
   invitations,
   inviteMember,
   memberProfiles,
@@ -2798,6 +3011,7 @@ function CollaborationScreen({
   addFolderComment: (folder: WorkspaceFolder, body: string) => Promise<void>;
   attachFolderFile: (folder: WorkspaceFolder) => Promise<void>;
   createWorkspaceFolder: (name: string) => Promise<void>;
+  createSmartPlan: (prompt: string) => Promise<WorkspaceFolder | null>;
   deleteWorkspaceFolder: (folder: WorkspaceFolder) => Promise<boolean>;
   deleteFolderChecklistItem: (item: FolderChecklistItem) => Promise<boolean>;
   deleteFolderNote: (comment: FolderComment) => Promise<boolean>;
@@ -2806,6 +3020,7 @@ function CollaborationScreen({
   folderChecklists: FolderChecklist[];
   folderComments: FolderComment[];
   folderFiles: FolderFile[];
+  folderSections: FolderSection[];
   invitations: WorkspaceInvitation[];
   inviteMember: (email: string, folder?: WorkspaceFolder | null) => Promise<boolean>;
   memberProfiles: MemberProfile[];
@@ -2826,6 +3041,9 @@ function CollaborationScreen({
   const { colors, styles, textStyles } = useAppStyles();
   const [inviteEmail, setInviteEmail] = useState('');
   const [isInviteModalVisible, setIsInviteModalVisible] = useState(false);
+  const [isAssistantModalVisible, setIsAssistantModalVisible] = useState(false);
+  const [assistantPrompt, setAssistantPrompt] = useState('');
+  const [assistantBusy, setAssistantBusy] = useState(false);
   const [folderName, setFolderName] = useState('');
   const [isFolderModalVisible, setIsFolderModalVisible] = useState(false);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
@@ -2849,6 +3067,11 @@ function CollaborationScreen({
   const selectedFiles = selectedFolder ? folderFiles.filter((file) => file.folder_id === selectedFolder.id) : [];
   const selectedComments = selectedFolder
     ? folderComments.filter((comment) => comment.folder_id === selectedFolder.id)
+    : [];
+  const selectedSections = selectedFolder
+    ? folderSections
+        .filter((section) => section.folder_id === selectedFolder.id)
+        .sort((a, b) => a.position - b.position || a.title.localeCompare(b.title))
     : [];
   const activeMembers = selectedFolder
     ? folderMembers.filter((member) => member.folder_id === selectedFolder.id)
@@ -3010,6 +3233,31 @@ function CollaborationScreen({
     setIsInviteModalVisible(false);
   };
 
+  const closeAssistantModal = () => {
+    if (assistantBusy) {
+      return;
+    }
+
+    setAssistantPrompt('');
+    setIsAssistantModalVisible(false);
+  };
+
+  const submitSmartPlan = async () => {
+    if (!assistantPrompt.trim()) {
+      Alert.alert('Assistente de planejamento', 'Descreva o plano que voce quer organizar.');
+      return;
+    }
+
+    setAssistantBusy(true);
+    const folder = await createSmartPlan(assistantPrompt);
+    setAssistantBusy(false);
+    if (folder) {
+      setAssistantPrompt('');
+      setIsAssistantModalVisible(false);
+      setSelectedFolderId(folder.id);
+    }
+  };
+
   const submitInvite = async () => {
     if (!inviteEmail.trim()) {
       Alert.alert('Convite', 'Informe um email para enviar o convite.');
@@ -3086,6 +3334,23 @@ function CollaborationScreen({
               <Text style={styles.addFolderText}>+ Pasta</Text>
             </Pressable>
           </View>
+
+          <Pressable
+            accessibilityLabel="Criar plano com assistente"
+            accessibilityRole="button"
+            onPress={() => setIsAssistantModalVisible(true)}
+            style={({ pressed }) => [styles.assistantHeroButton, pressed && styles.pressed]}
+          >
+            <View style={styles.assistantIconWrap}>
+              <Sparkles color={colors.surface} size={22} strokeWidth={2.5} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.assistantHeroTitle}>Criar com assistente</Text>
+              <Text style={styles.assistantHeroCopy}>
+                Descreva uma viagem, evento, compra ou projeto e receba uma pasta pronta.
+              </Text>
+            </View>
+          </Pressable>
 
           {foldersForWorkspace.length ? (
             <View style={styles.planFolderGrid}>
@@ -3195,6 +3460,14 @@ function CollaborationScreen({
               </Button>
             </View>
           </View>
+
+          {selectedSections.length ? (
+            <View style={styles.smartSectionStack}>
+              {selectedSections.map((section) => (
+                <FolderSectionCard key={section.id} section={section} />
+              ))}
+            </View>
+          ) : null}
 
           <View style={styles.noteContentCard}>
             <Text style={styles.noteCardTitle}>Notas</Text>
@@ -3333,6 +3606,46 @@ function CollaborationScreen({
         </KeyboardAvoidingView>
       </Modal>
 
+      <Modal animationType="slide" onRequestClose={closeAssistantModal} transparent visible={isAssistantModalVisible}>
+        <KeyboardAvoidingView behavior="height" keyboardVerticalOffset={0} style={styles.modalKeyboardAvoiding}>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalSheet}>
+              <ScrollView contentContainerStyle={styles.modalSheetContent} keyboardShouldPersistTaps="handled">
+                <View style={styles.rowBetween}>
+                  <Text style={styles.modalTitle}>Assistente de planejamento</Text>
+                  <Pressable accessibilityLabel="Fechar assistente" accessibilityRole="button" onPress={closeAssistantModal}>
+                    <Text style={styles.modalClose}>x</Text>
+                  </Pressable>
+                </View>
+                <View style={styles.assistantPromptCard}>
+                  <Sparkles color={colors.primary} size={22} strokeWidth={2.5} />
+                  <Text style={styles.assistantPromptTitle}>Transforme uma ideia em plano</Text>
+                  <Text style={styles.assistantPromptCopy}>
+                    Ex: Planejar viagem para Toquio em outubro com orçamento de R$ 12.000.
+                  </Text>
+                </View>
+                <Field
+                  multiline
+                  onChangeText={setAssistantPrompt}
+                  placeholder="Descreva o que voce quer organizar"
+                  style={styles.assistantPromptField}
+                  textAlignVertical="top"
+                  value={assistantPrompt}
+                />
+                <View style={styles.profileModalActions}>
+                  <Button disabled={assistantBusy} onPress={closeAssistantModal} variant="secondary">
+                    Cancelar
+                  </Button>
+                  <Button disabled={assistantBusy} onPress={submitSmartPlan}>
+                    {assistantBusy ? 'Criando...' : 'Gerar plano'}
+                  </Button>
+                </View>
+              </ScrollView>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       <Modal
         animationType="slide"
         onRequestClose={closeChecklistItemModal}
@@ -3399,6 +3712,62 @@ function CollaborationScreen({
           </View>
         </KeyboardAvoidingView>
       </Modal>
+    </View>
+  );
+}
+
+function FolderSectionCard({ section }: { section: FolderSection }) {
+  const { colors, styles } = useAppStyles();
+
+  if (section.kind === 'budget') {
+    const [budgetValue, ...budgetLines] = (section.body ?? '').split('\n').filter(Boolean);
+
+    return (
+      <View style={styles.noteContentCard}>
+        <View style={styles.sectionTitleRow}>
+          <WalletCards color={colors.primary} size={20} strokeWidth={2.5} />
+          <Text style={styles.noteCardTitle}>{section.title}</Text>
+        </View>
+        <View style={styles.budgetPlaceholder}>
+          <Text style={styles.budgetValue}>{budgetValue || 'Orcamento a definir'}</Text>
+          {budgetLines.map((line) => (
+            <Text key={line} style={styles.budgetCopy}>{line}</Text>
+          ))}
+        </View>
+      </View>
+    );
+  }
+
+  if (section.kind === 'map') {
+    return (
+      <View style={styles.noteContentCard}>
+        <View style={styles.sectionTitleRow}>
+          <MapPin color={colors.primary} size={20} strokeWidth={2.5} />
+          <Text style={styles.noteCardTitle}>{section.title}</Text>
+        </View>
+        <View style={styles.mapPlaceholder}>
+          <Text style={styles.mapPin}>+</Text>
+          <Text style={styles.mapText}>{section.body || 'Defina os principais lugares do plano.'}</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (section.kind === 'image') {
+    return (
+      <View style={styles.noteContentCard}>
+        <Text style={styles.noteEyebrow}>REFERENCIA VISUAL</Text>
+        <Text style={styles.noteCardTitle}>{section.title}</Text>
+        <Text style={styles.noteBody}>{section.body || section.media_url || 'Adicione uma imagem ou link de referencia.'}</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.noteContentCard}>
+      <Text style={styles.noteEyebrow}>PLANO INTELIGENTE</Text>
+      <Text style={styles.noteCardTitle}>{section.title}</Text>
+      <Text style={styles.noteBody}>{section.body}</Text>
     </View>
   );
 }
@@ -3939,6 +4308,295 @@ function getGreeting() {
     return 'Boa tarde';
   }
   return 'Boa noite';
+}
+
+function buildSmartPlanDraft(prompt: string): SmartPlanDraft | null {
+  const normalizedPrompt = prompt.trim().replace(/\s+/g, ' ');
+  if (normalizedPrompt.length < 8) {
+    return null;
+  }
+
+  const lowerPrompt = normalizeForSearch(normalizedPrompt);
+  const kind = inferSmartPlanKind(lowerPrompt);
+  const subject = extractSmartPlanSubject(normalizedPrompt, kind);
+  const budget = extractBudget(normalizedPrompt);
+  const targetDate = extractTargetDate(lowerPrompt);
+  const folderName = buildSmartPlanFolderName(kind, subject);
+  const budgetLine = budget ? `Orcamento total: ${budget}` : 'Orcamento total: a definir';
+  const dateLine = targetDate.label ? `Prazo alvo: ${targetDate.label}` : 'Prazo alvo: a definir';
+
+  const commonSections: SmartPlanSectionDraft[] = [
+    {
+      kind: 'text',
+      title: 'Resumo executivo',
+      body: `${normalizedPrompt}\n\n${dateLine}\n${budgetLine}\nPlano criado para transformar a ideia em proximas acoes, decisoes e pontos de colaboracao.`,
+      media_url: null,
+    },
+  ];
+
+  if (kind === 'trip') {
+    return {
+      folderName,
+      description: `Roteiro, documentos, reservas e orcamento para ${subject}.`,
+      checklistTitle: 'Checklist da viagem',
+      checklistItems: [
+        { title: 'Definir datas e quantidade de dias', assignedLabel: 'Voce' },
+        { title: 'Pesquisar passagens e hospedagem', assignedLabel: null },
+        { title: 'Separar documentos, vistos e seguros', assignedLabel: null },
+        { title: 'Montar roteiro por bairro ou cidade', assignedLabel: 'Parceiro' },
+        { title: 'Reservar experiencias prioritarias', assignedLabel: null },
+        { title: 'Conferir cambio, internet e transporte local', assignedLabel: null },
+      ],
+      reminders: targetDate.reminderAt
+        ? [{ title: `Revisar reservas de ${subject}`, remindAt: targetDate.reminderAt }]
+        : [],
+      sections: [
+        ...commonSections,
+        {
+          kind: 'map',
+          title: 'Roteiro sugerido',
+          body: `Base: ${subject}. Organize os pontos por proximidade: chegada e hospedagem, experiencias principais, restaurantes, deslocamentos e tempo livre.`,
+          media_url: null,
+        },
+        {
+          kind: 'budget',
+          title: 'Orcamento estimado',
+          body: [
+            budgetLine,
+            'Passagens: 35%',
+            'Hospedagem: 30%',
+            'Alimentacao: 15%',
+            'Passeios e transporte: 15%',
+            'Reserva de seguranca: 5%',
+          ].join('\n'),
+          media_url: null,
+        },
+        {
+          kind: 'text',
+          title: 'Decisoes pendentes',
+          body: 'Fechar periodo da viagem, escolher bairro base, priorizar passeios pagos e combinar responsabilidades entre os membros.',
+          media_url: null,
+        },
+      ],
+    };
+  }
+
+  if (kind === 'shopping') {
+    return {
+      folderName,
+      description: `Lista inteligente de compras, prioridades e limites para ${subject}.`,
+      checklistTitle: 'Lista priorizada',
+      checklistItems: [
+        { title: 'Separar itens essenciais', assignedLabel: 'Voce' },
+        { title: 'Comparar precos antes de comprar', assignedLabel: null },
+        { title: 'Definir limite por categoria', assignedLabel: null },
+        { title: 'Marcar itens recorrentes', assignedLabel: null },
+        { title: 'Conferir estoque antes de sair', assignedLabel: 'Casa' },
+      ],
+      reminders: [],
+      sections: [
+        ...commonSections,
+        {
+          kind: 'budget',
+          title: 'Controle de gastos',
+          body: [budgetLine, 'Essenciais: 60%', 'Reposicao: 25%', 'Extras: 10%', 'Margem: 5%'].join('\n'),
+          media_url: null,
+        },
+        {
+          kind: 'text',
+          title: 'Criterios de compra',
+          body: 'Priorize o que resolve a semana atual, evite duplicados e registre marcas ou lojas preferidas nas notas.',
+          media_url: null,
+        },
+      ],
+    };
+  }
+
+  if (kind === 'movie') {
+    return {
+      folderName,
+      description: `Curadoria colaborativa para ${subject}.`,
+      checklistTitle: 'Fila para assistir',
+      checklistItems: [
+        { title: 'Adicionar indicacoes de todos os membros', assignedLabel: null },
+        { title: 'Separar por genero ou duracao', assignedLabel: null },
+        { title: 'Escolher primeira sessao', assignedLabel: 'Voce' },
+        { title: 'Registrar onde assistir', assignedLabel: null },
+      ],
+      reminders: targetDate.reminderAt
+        ? [{ title: `Escolher proximo filme de ${subject}`, remindAt: targetDate.reminderAt }]
+        : [],
+      sections: [
+        ...commonSections,
+        {
+          kind: 'text',
+          title: 'Regras da curadoria',
+          body: 'Cada pessoa indica opcoes, o grupo vota nas prioridades e a lista fica organizada por humor: leve, intenso, classico ou serie longa.',
+          media_url: null,
+        },
+      ],
+    };
+  }
+
+  if (kind === 'event') {
+    return {
+      folderName,
+      description: `Cronograma, convidados e preparacao para ${subject}.`,
+      checklistTitle: 'Preparacao do evento',
+      checklistItems: [
+        { title: 'Definir data, local e horario', assignedLabel: 'Voce' },
+        { title: 'Montar lista de convidados', assignedLabel: null },
+        { title: 'Confirmar comidas, bebidas e estrutura', assignedLabel: null },
+        { title: 'Enviar convites ou lembretes', assignedLabel: null },
+        { title: 'Separar plano B para imprevistos', assignedLabel: null },
+      ],
+      reminders: targetDate.reminderAt
+        ? [{ title: `Confirmar preparacao de ${subject}`, remindAt: targetDate.reminderAt }]
+        : [],
+      sections: [
+        ...commonSections,
+        {
+          kind: 'budget',
+          title: 'Orcamento do evento',
+          body: [budgetLine, 'Local e estrutura: 35%', 'Comidas e bebidas: 40%', 'Decoracao: 15%', 'Reserva: 10%'].join('\n'),
+          media_url: null,
+        },
+        {
+          kind: 'map',
+          title: 'Local e logistica',
+          body: 'Registre endereco, estacionamento, horario de chegada e responsaveis por levar cada item.',
+          media_url: null,
+        },
+      ],
+    };
+  }
+
+  return {
+    folderName,
+    description: `Plano de acao colaborativo para ${subject}.`,
+    checklistTitle: 'Proximos passos',
+    checklistItems: [
+      { title: 'Definir objetivo final', assignedLabel: 'Voce' },
+      { title: 'Quebrar o plano em etapas menores', assignedLabel: null },
+      { title: 'Separar responsaveis', assignedLabel: null },
+      { title: 'Definir primeiro marco de entrega', assignedLabel: null },
+      { title: 'Revisar progresso com o grupo', assignedLabel: null },
+    ],
+    reminders: targetDate.reminderAt
+      ? [{ title: `Revisar plano: ${subject}`, remindAt: targetDate.reminderAt }]
+      : [],
+    sections: [
+      ...commonSections,
+      {
+        kind: 'text',
+        title: 'Plano de ataque',
+        body: 'Comece pelo resultado esperado, liste restricoes, distribua responsabilidades e mantenha as decisoes importantes nas notas da pasta.',
+        media_url: null,
+      },
+      {
+        kind: 'budget',
+        title: 'Recursos',
+        body: [budgetLine, 'Tempo: estimar por etapa', 'Pessoas: definir responsaveis', 'Riscos: revisar semanalmente'].join('\n'),
+        media_url: null,
+      },
+    ],
+  };
+}
+
+function inferSmartPlanKind(prompt: string) {
+  if (/(viagem|viajar|roteiro|hotel|passagem|turismo|destino)/.test(prompt)) {
+    return 'trip';
+  }
+  if (/(compra|compras|mercado|lista|supermercado)/.test(prompt)) {
+    return 'shopping';
+  }
+  if (/(filme|filmes|serie|series|assistir|cinema)/.test(prompt)) {
+    return 'movie';
+  }
+  if (/(evento|festa|aniversario|casamento|encontro|reuniao)/.test(prompt)) {
+    return 'event';
+  }
+  return 'project';
+}
+
+function extractSmartPlanSubject(prompt: string, kind: string) {
+  const cleanPrompt = prompt.replace(/\s+com\s+orcamento.*$/i, '').replace(/\s+orçamento.*$/i, '').trim();
+  const destinationMatch = cleanPrompt.match(/\b(?:para|pra|em|no|na)\s+([^,.]+?)(?:\s+em\s+|\s+no\s+|\s+na\s+|$)/i);
+  const rawSubject = destinationMatch?.[1]?.trim() || cleanPrompt.replace(/^(planejar|organizar|criar|montar)\s+/i, '').trim();
+  const subject = rawSubject || {
+    trip: 'a proxima viagem',
+    shopping: 'as compras',
+    movie: 'a lista de filmes',
+    event: 'o evento',
+    project: 'o projeto',
+  }[kind] || 'o plano';
+
+  return subject.charAt(0).toUpperCase() + subject.slice(1);
+}
+
+function buildSmartPlanFolderName(kind: string, subject: string) {
+  const prefix = {
+    trip: 'Viagem',
+    shopping: 'Compras',
+    movie: 'Filmes',
+    event: 'Evento',
+    project: 'Projeto',
+  }[kind] || 'Plano';
+
+  return `${prefix}: ${subject}`.slice(0, 64);
+}
+
+function extractBudget(prompt: string) {
+  const explicitBudgetMatch = prompt.match(/(?:orcamento|orçamento|budget)[^\dR$]*(?:R\$\s*)?(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?|\d+)(?:\s*(?:reais|brl))?/i);
+  const currencyMatch = prompt.match(/R\$\s*(\d{1,3}(?:[.\s]\d{3})*(?:,\d{2})?|\d+)/i);
+  const budgetMatch = explicitBudgetMatch ?? currencyMatch;
+  if (!budgetMatch) {
+    return null;
+  }
+
+  const rawValue = budgetMatch[1].replace(/\s/g, '');
+  return `R$ ${rawValue}`;
+}
+
+function extractTargetDate(prompt: string) {
+  const monthNames = [
+    'janeiro',
+    'fevereiro',
+    'marco',
+    'abril',
+    'maio',
+    'junho',
+    'julho',
+    'agosto',
+    'setembro',
+    'outubro',
+    'novembro',
+    'dezembro',
+  ];
+  const monthIndex = monthNames.findIndex((month) => prompt.includes(month));
+  if (monthIndex === -1) {
+    return { label: null, reminderAt: null };
+  }
+
+  const today = new Date();
+  const target = new Date(today.getFullYear(), monthIndex, 1, 9, 0, 0, 0);
+  if (target < today) {
+    target.setFullYear(target.getFullYear() + 1);
+  }
+  const reminder = new Date(target);
+  reminder.setDate(Math.max(1, target.getDate() - 14));
+
+  return {
+    label: monthNames[monthIndex].charAt(0).toUpperCase() + monthNames[monthIndex].slice(1),
+    reminderAt: reminder.toISOString(),
+  };
+}
+
+function normalizeForSearch(value: string) {
+  return value
+    .toLocaleLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
 }
 
 async function seedDefaultTaskCategories(ownerId: string) {
@@ -4620,6 +5278,67 @@ function makeStyles(colors: AppColors) {
     flexDirection: 'row',
     gap: spacing.md,
   },
+  assistantHeroButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: radius.lg,
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 104,
+    padding: spacing.xl,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.14,
+    shadowRadius: 18,
+  },
+  assistantIconWrap: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderColor: 'rgba(255,255,255,0.34)',
+    borderRadius: 22,
+    borderWidth: 1,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  assistantHeroTitle: {
+    color: colors.surface,
+    fontFamily: fontFamily.black,
+    fontSize: 20,
+    fontWeight: '900',
+  },
+  assistantHeroCopy: {
+    color: colors.surface,
+    fontFamily: fontFamily.medium,
+    fontSize: typography.small,
+    fontWeight: '500',
+    lineHeight: 18,
+    marginTop: spacing.xs,
+    opacity: 0.88,
+  },
+  assistantPromptCard: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    gap: spacing.sm,
+    padding: spacing.lg,
+  },
+  assistantPromptTitle: {
+    color: colors.text,
+    fontFamily: fontFamily.black,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  assistantPromptCopy: {
+    color: colors.muted,
+    fontFamily: fontFamily.regular,
+    fontSize: typography.small,
+    lineHeight: 18,
+  },
+  assistantPromptField: {
+    minHeight: 132,
+  },
   notesActionButton: {
     alignItems: 'center',
     backgroundColor: colors.surfaceMuted,
@@ -4774,6 +5493,14 @@ function makeStyles(colors: AppColors) {
     gap: spacing.md,
     padding: spacing.xl,
   },
+  smartSectionStack: {
+    gap: spacing.md,
+  },
+  sectionTitleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
   noteMediaCard: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
@@ -4855,14 +5582,25 @@ function makeStyles(colors: AppColors) {
     alignItems: 'center',
     backgroundColor: colors.surfaceMuted,
     borderRadius: radius.md,
-    height: 128,
+    gap: spacing.sm,
+    minHeight: 128,
     justifyContent: 'center',
+    padding: spacing.lg,
   },
   mapPin: {
     color: colors.primary,
     fontFamily: fontFamily.black,
     fontSize: 42,
     fontWeight: '900',
+    lineHeight: 44,
+  },
+  mapText: {
+    color: colors.text,
+    fontFamily: fontFamily.semiBold,
+    fontSize: typography.small,
+    fontWeight: '600',
+    lineHeight: 19,
+    textAlign: 'center',
   },
   budgetPlaceholder: {
     alignItems: 'center',
