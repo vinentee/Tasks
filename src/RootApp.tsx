@@ -14,6 +14,7 @@ import {
   CalendarDays,
   Bell,
   Check,
+  EllipsisVertical,
   FolderKanban,
   Home as HomeIcon,
   ListTodo,
@@ -111,6 +112,22 @@ type TaskCreateInput = {
   dueAt: string | null;
   notificationRule: TaskDeadlineNotificationInput | null;
   priority: Priority;
+  title: string;
+};
+type TaskCategoryFilterKey = 'uncategorized' | string;
+type TaskChecklistUpdateItem = {
+  id: string | null;
+  isDone: boolean;
+  position: number;
+  title: string;
+};
+type TaskUpdateInput = {
+  categoryId: string | null;
+  checklistItems: TaskChecklistUpdateItem[];
+  description: string | null;
+  dueAt: string | null;
+  priority: Priority;
+  task: Task;
   title: string;
 };
 type SmartPlanChecklistItem = {
@@ -518,6 +535,7 @@ function MainApp({ user }: { user: UserContext }) {
   const [lastMainTab, setLastMainTab] = useState<MainTabKey>('home');
   const [isTaskModalVisible, setIsTaskModalVisible] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [plansResetToken, setPlansResetToken] = useState(0);
   const [loading, setLoading] = useState(false);
   const [profileName, setProfileName] = useState(user.fullName);
@@ -582,6 +600,10 @@ function MainApp({ user }: { user: UserContext }) {
     () => tasks.find((task) => task.id === selectedTaskId) ?? null,
     [selectedTaskId, tasks],
   );
+  const editingTask = useMemo(
+    () => tasks.find((task) => task.id === editingTaskId) ?? null,
+    [editingTaskId, tasks],
+  );
   const selectedTaskChecklistItems = useMemo(
     () =>
       selectedTask
@@ -590,6 +612,15 @@ function MainApp({ user }: { user: UserContext }) {
             .sort((a, b) => a.position - b.position || a.title.localeCompare(b.title))
         : [],
     [checklistItems, selectedTask],
+  );
+  const editingTaskChecklistItems = useMemo(
+    () =>
+      editingTask
+        ? checklistItems
+            .filter((item) => item.task_id === editingTask.id)
+            .sort((a, b) => a.position - b.position || a.title.localeCompare(b.title))
+        : [],
+    [checklistItems, editingTask],
   );
   const selectedTaskNotificationRule = useMemo(
     () =>
@@ -836,6 +867,12 @@ function MainApp({ user }: { user: UserContext }) {
   }, [selectedTask, selectedTaskId]);
 
   useEffect(() => {
+    if (editingTaskId && !editingTask) {
+      setEditingTaskId(null);
+    }
+  }, [editingTask, editingTaskId]);
+
+  useEffect(() => {
     if (!supabase) {
       return;
     }
@@ -992,6 +1029,61 @@ function MainApp({ user }: { user: UserContext }) {
     await persistTaskNotificationRule(task, rule, rule);
   };
 
+  const createTaskCategory = async (name: string) => {
+    const normalizedName = normalizeCategoryName(name);
+    if (!normalizedName) {
+      Alert.alert('Informe o nome da categoria');
+      return false;
+    }
+
+    if (taskCategories.some((category) => category.name.trim().toLocaleLowerCase() === normalizedName.toLocaleLowerCase())) {
+      Alert.alert('Categoria ja existe', 'Use um nome diferente para criar a categoria.');
+      return false;
+    }
+
+    const nextPosition = taskCategories.length
+      ? Math.max(...taskCategories.map((category) => category.position)) + 1
+      : 1;
+
+    if (!supabase) {
+      const now = new Date().toISOString();
+      const nextCategory: TaskCategory = {
+        id: `category-${Date.now()}`,
+        owner_id: user.id,
+        name: normalizedName,
+        color: '#2563eb',
+        icon: 'list',
+        position: nextPosition,
+        updated_at: now,
+      };
+      setTaskCategories((current) => [...current, nextCategory].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)));
+      return true;
+    }
+
+    const { data, error } = await supabase
+      .from('task_categories')
+      .insert({
+        owner_id: user.id,
+        name: normalizedName,
+        color: '#2563eb',
+        icon: 'list',
+        position: nextPosition,
+      })
+      .select('*')
+      .single();
+
+    if (error) {
+      Alert.alert('Erro ao criar categoria', error.message);
+      return false;
+    }
+
+    if (data) {
+      setTaskCategories((current) => [...current, data].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)));
+    }
+
+    return true;
+  };
+
   const createTask = async ({ categoryId, checklistItems: initialChecklistItems, description, dueAt, notificationRule, priority, title }: TaskCreateInput) => {
     if (!title.trim()) {
       return false;
@@ -1079,6 +1171,136 @@ function MainApp({ user }: { user: UserContext }) {
       if (checklistResult.error) {
         Alert.alert('Tarefa criada', `A tarefa foi criada, mas o checklist nao foi salvo: ${checklistResult.error.message}`);
       }
+    }
+
+    return true;
+  };
+
+  const updateTask = async ({ categoryId, checklistItems: nextChecklistDraft, description, dueAt, priority, task, title }: TaskUpdateInput) => {
+    const normalizedTitle = title.trim();
+    if (!normalizedTitle) {
+      Alert.alert('Informe o titulo da tarefa');
+      return false;
+    }
+
+    const existingRule = taskNotificationRules.find((rule) => rule.task_id === task.id) ?? null;
+    const existingChecklistItems = checklistItems
+      .filter((item) => item.task_id === task.id)
+      .sort((a, b) => a.position - b.position || a.title.localeCompare(b.title));
+    const existingChecklistById = new Map(existingChecklistItems.map((item) => [item.id, item]));
+    const nextChecklistItems = normalizeTaskChecklistUpdateItems(nextChecklistDraft).map((item, index) => {
+      const existingItem = item.id ? existingChecklistById.get(item.id) : null;
+      return {
+        id: item.id ?? `check-${Date.now()}-${index}`,
+        task_id: task.id,
+        title: item.title,
+        is_done: existingItem?.is_done ?? item.isDone,
+        position: index + 1,
+      };
+    });
+    const didChangeDueAt = task.due_at !== dueAt;
+    const nextTask: Task = {
+      ...task,
+      title: normalizedTitle,
+      description,
+      priority,
+      due_at: dueAt,
+      category_id: categoryId,
+      updated_at: new Date().toISOString(),
+    };
+
+    const applyTaskLocally = (updatedTask: Task) => {
+      setTasks((current) => sortTasks(current.map((item) => (item.id === updatedTask.id ? updatedTask : item))));
+    };
+    const applyChecklistLocally = (items: ChecklistItem[]) => {
+      setChecklistItems((current) => [
+        ...current.filter((item) => item.task_id !== task.id),
+        ...items,
+      ]);
+    };
+
+    applyTaskLocally(nextTask);
+    applyChecklistLocally(nextChecklistItems);
+
+    if (supabase) {
+      const supabaseClient = supabase;
+      const { error } = await supabaseClient
+        .from('tasks')
+        .update({
+          title: normalizedTitle,
+          description,
+          priority,
+          due_at: dueAt,
+          category_id: categoryId,
+        })
+        .eq('id', task.id);
+
+      if (error) {
+        applyTaskLocally(task);
+        applyChecklistLocally(existingChecklistItems);
+        Alert.alert('Erro ao editar tarefa', error.message);
+        return false;
+      }
+
+      const normalizedChecklistDraft = normalizeTaskChecklistUpdateItems(nextChecklistDraft);
+      const nextExistingIds = new Set(normalizedChecklistDraft.map((item) => item.id).filter(Boolean));
+      const deletedIds = existingChecklistItems
+        .filter((item) => !nextExistingIds.has(item.id))
+        .map((item) => item.id);
+      const existingUpdates = nextChecklistItems.filter((item) => existingChecklistById.has(item.id));
+      const newItems = nextChecklistItems.filter((item) => !existingChecklistById.has(item.id));
+
+      if (deletedIds.length) {
+        const { error: deleteError } = await supabaseClient.from('task_checklist_items').delete().in('id', deletedIds);
+        if (deleteError) {
+          applyChecklistLocally(existingChecklistItems);
+          Alert.alert('Erro ao editar checklist', deleteError.message);
+          return false;
+        }
+      }
+
+      const updateResults = await Promise.all(
+        existingUpdates.map((item) =>
+          supabaseClient
+            .from('task_checklist_items')
+            .update({ title: item.title, position: item.position })
+            .eq('id', item.id),
+        ),
+      );
+      const updateError = updateResults.find((result) => result.error)?.error;
+      if (updateError) {
+        applyChecklistLocally(existingChecklistItems);
+        Alert.alert('Erro ao editar checklist', updateError.message);
+        return false;
+      }
+
+      if (newItems.length) {
+        const { data, error: insertError } = await supabaseClient
+          .from('task_checklist_items')
+          .insert(newItems.map((item) => ({ task_id: task.id, title: item.title, position: item.position })))
+          .select('*');
+
+        if (insertError) {
+          applyChecklistLocally(existingChecklistItems);
+          Alert.alert('Erro ao editar checklist', insertError.message);
+          return false;
+        }
+
+        applyChecklistLocally([
+          ...existingUpdates,
+          ...(data ?? []),
+        ].sort((a, b) => a.position - b.position || a.title.localeCompare(b.title)));
+      }
+    }
+
+    if (didChangeDueAt) {
+      if (!dueAt || nextTask.status === 'done') {
+        await cancelTaskNotificationRule(nextTask, existingRule);
+      } else {
+        await rescheduleTaskNotificationRule(nextTask, existingRule);
+      }
+    } else if (existingRule?.enabled && dueAt && nextTask.status !== 'done' && task.title !== normalizedTitle) {
+      await rescheduleTaskNotificationRule(nextTask, existingRule);
     }
 
     return true;
@@ -1187,18 +1409,25 @@ function MainApp({ user }: { user: UserContext }) {
   };
 
   const toggleChecklistItem = async (item: ChecklistItem) => {
-    if (!supabase) {
+    const nextIsDone = !item.is_done;
+    const applyChecklistItemStatus = (isDone: boolean) => {
       setChecklistItems((current) =>
-        current.map((entry) => (entry.id === item.id ? { ...entry, is_done: !entry.is_done } : entry)),
+        current.map((entry) => (entry.id === item.id ? { ...entry, is_done: isDone } : entry)),
       );
+    };
+
+    applyChecklistItemStatus(nextIsDone);
+
+    if (!supabase) {
       return;
     }
 
     const { error } = await supabase
       .from('task_checklist_items')
-      .update({ is_done: !item.is_done })
+      .update({ is_done: nextIsDone })
       .eq('id', item.id);
     if (error) {
+      applyChecklistItemStatus(item.is_done);
       Alert.alert('Erro ao atualizar item', error.message);
     }
   };
@@ -2183,10 +2412,12 @@ function MainApp({ user }: { user: UserContext }) {
         {activeTab === 'tasks' ? (
           <TasksScreen
             categories={taskCategories}
+            createCategory={createTaskCategory}
             createTask={createTask}
             deleteTask={deleteTask}
             isCreateModalVisible={isTaskModalVisible}
             onCloseCreateModal={() => setIsTaskModalVisible(false)}
+            onEditTask={(task) => setEditingTaskId(task.id)}
             onOpenCreateModal={() => setIsTaskModalVisible(true)}
             onOpenTaskDetail={(task) => setSelectedTaskId(task.id)}
             tasks={tasks}
@@ -2277,12 +2508,22 @@ function MainApp({ user }: { user: UserContext }) {
         checklistItems={selectedTaskChecklistItems}
         deleteTask={deleteTask}
         isVisible={Boolean(selectedTask)}
+        onEditTask={(task) => setEditingTaskId(task.id)}
         onClose={() => setSelectedTaskId(null)}
         notificationRule={selectedTaskNotificationRule}
         task={selectedTask}
         toggleChecklistItem={toggleChecklistItem}
         toggleTaskDone={toggleTaskDone}
         updateTaskNotificationSelection={updateTaskNotificationSelection}
+      />
+
+      <TaskEditModal
+        categories={taskCategories}
+        checklistItems={editingTaskChecklistItems}
+        isVisible={Boolean(editingTask)}
+        onClose={() => setEditingTaskId(null)}
+        task={editingTask}
+        updateTask={updateTask}
       />
 
       <TabBar activeTab={activeTab} onChange={changeMainTab} />
@@ -2308,8 +2549,8 @@ function HomeScreen({
   const doneToday = todayTasks.filter((task) => task.status === 'done').length;
   const totalToday = todayTasks.length;
   const progress = totalToday ? Math.round((doneToday / totalToday) * 100) : 0;
-  const openToday = todayTasks
-    .filter((task) => task.status !== 'done')
+  const openTodayTasks = todayTasks.filter((task) => task.status !== 'done');
+  const openToday = openTodayTasks
     .sort(sortTasksByPriorityAndTime)
     .slice(0, 3);
   const upcomingReminders = reminders.filter((reminder) => !reminder.is_done).filter((reminder) => isFuture(reminder.remind_at));
@@ -2327,6 +2568,13 @@ function HomeScreen({
         <Text style={styles.heroCopy}>
           Voce esta em estado de fluxo. {progress}% das suas tarefas de hoje foram concluidas.
         </Text>
+      </View>
+
+      <View style={styles.tasksGreetingCard}>
+        <Text style={styles.tasksGreetingTitle}>
+          Voce tem {openTodayTasks.length} tarefas para concluir hoje.
+        </Text>
+        <Text style={styles.tasksGreetingCopy}>Foque no essencial e avance no que importa agora.</Text>
       </View>
 
       <View style={styles.dashboardCard}>
@@ -2359,13 +2607,13 @@ function HomeScreen({
         )}
       </View>
 
-      <View style={styles.insightCard}>
+      {/* <View style={styles.insightCard}>
         <Text style={styles.insightTitle}>Insight: Voce e mais produtivo entre 9h e 11h.</Text>
         <Text style={styles.insightCopy}>Agende suas tarefas complexas para amanha cedo.</Text>
         {upcomingReminders.length ? (
           <Text style={styles.mutedText}>{upcomingReminders.length} lembrete(s) futuros no calendario.</Text>
         ) : null}
-      </View>
+      </View> */}
     </View>
   );
 }
@@ -2459,10 +2707,12 @@ function TabBar({ activeTab, onChange }: { activeTab: TabKey; onChange: (tab: Ma
 
 function TasksScreen({
   categories,
+  createCategory,
   createTask,
   deleteTask,
   isCreateModalVisible,
   onCloseCreateModal,
+  onEditTask,
   onOpenCreateModal,
   onOpenTaskDetail,
   onOpenProfile,
@@ -2471,10 +2721,12 @@ function TasksScreen({
   user,
 }: {
   categories: TaskCategory[];
+  createCategory: (name: string) => Promise<boolean>;
   createTask: (input: TaskCreateInput) => Promise<boolean>;
   deleteTask: (task: Task) => Promise<void>;
   isCreateModalVisible: boolean;
   onCloseCreateModal: () => void;
+  onEditTask: (task: Task) => void;
   onOpenCreateModal: () => void;
   onOpenTaskDetail: (task: Task) => void;
   onOpenProfile: () => void;
@@ -2482,48 +2734,100 @@ function TasksScreen({
   toggleTaskDone: (task: Task) => Promise<void>;
   user: UserContext;
 }) {
-  const { styles } = useAppStyles();
+  const { colors, styles } = useAppStyles();
+  const [selectedCategoryFilters, setSelectedCategoryFilters] = useState<TaskCategoryFilterKey[]>([]);
+  const [isCategoryModalVisible, setIsCategoryModalVisible] = useState(false);
   const sortedCategories = useMemo(
     () => [...categories].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)),
     [categories],
   );
-  const todayTasks = tasks.filter((task) => isToday(task.due_at));
-  const openTasksToday = todayTasks.filter((task) => task.status !== 'done').length;
-  const doneTasksToday = todayTasks.filter((task) => task.status === 'done').length;
   const weekTasks = tasks.filter((task) => isCurrentLocalWeek(task.due_at));
   const doneTasksThisWeek = weekTasks.filter((task) => task.status === 'done').length;
   const productivity = weekTasks.length ? Math.round((doneTasksThisWeek / weekTasks.length) * 100) : 0;
-  const uncategorizedTasks = tasks.filter((task) => !task.category_id);
+  const isAllCategoriesSelected = selectedCategoryFilters.length === 0;
+  const toggleCategoryFilter = (filter: TaskCategoryFilterKey) => {
+    setSelectedCategoryFilters((current) =>
+      current.includes(filter)
+        ? current.filter((item) => item !== filter)
+        : [...current, filter],
+    );
+  };
+  const visibleTasks = tasks.filter((task) => {
+    if (isAllCategoriesSelected) {
+      return true;
+    }
+
+    if (!task.category_id) {
+      return selectedCategoryFilters.includes('uncategorized');
+    }
+
+    return selectedCategoryFilters.includes(task.category_id);
+  });
+  const visibleCategories = isAllCategoriesSelected
+    ? sortedCategories
+    : sortedCategories.filter((category) => selectedCategoryFilters.includes(category.id));
+  const uncategorizedTasks = visibleTasks.filter((task) => !task.category_id);
 
   return (
     <View style={styles.tasksScreen}>
       <AppHeader onOpenProfile={onOpenProfile} user={user} />
 
-      <View style={styles.tasksGreetingCard}>
-        <Text style={styles.tasksGreetingTitle}>
-          {getGreeting()}, {getFirstName(user)}.
-        </Text>
-        <Text style={styles.tasksGreetingCopy}>
-          Voce tem {openTasksToday} tarefas para concluir hoje. Foque no essencial.
-        </Text>
-      </View>
-
       <View style={styles.productivityCard}>
-        <View style={styles.rowBetween}>
-          <Text style={styles.productivityLabel}>PRODUTIVIDADE</Text>
-          <Text style={styles.productivityIcon}>/</Text>
-        </View>
+        <Text style={styles.productivityLabel}>Produtividade semanal</Text>
         <Text style={styles.productivityValue}>{productivity}%</Text>
-        <Text style={styles.productivityCopy}>Score de Flow semanal</Text>
       </View>
 
-      {sortedCategories.map((category) => (
+      <View style={styles.taskFilterPanel}>
+        <View style={styles.rowBetween}>
+          <Text style={styles.modalLabel}>Categorias</Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setIsCategoryModalVisible(true)}
+            style={({ pressed }) => [styles.categoryCreateButton, pressed && styles.pressed]}
+          >
+            <Plus color={colors.primary} size={15} strokeWidth={2.8} />
+            <Text style={styles.categoryCreateText}>Nova</Text>
+          </Pressable>
+        </View>
+        <View style={styles.segmented}>
+          <Pressable
+            onPress={() => setSelectedCategoryFilters([])}
+            style={[styles.segment, isAllCategoriesSelected && styles.activeSegment]}
+          >
+            <Text style={[styles.segmentText, isAllCategoriesSelected && styles.activeSegmentText]}>
+              Todas
+            </Text>
+          </Pressable>
+          {sortedCategories.map((category) => (
+            <Pressable
+              key={category.id}
+              onPress={() => toggleCategoryFilter(category.id)}
+              style={[styles.segment, selectedCategoryFilters.includes(category.id) && styles.activeSegment]}
+            >
+              <Text style={[styles.segmentText, selectedCategoryFilters.includes(category.id) && styles.activeSegmentText]}>
+                {category.name}
+              </Text>
+            </Pressable>
+          ))}
+          <Pressable
+            onPress={() => toggleCategoryFilter('uncategorized')}
+            style={[styles.segment, selectedCategoryFilters.includes('uncategorized') && styles.activeSegment]}
+          >
+            <Text style={[styles.segmentText, selectedCategoryFilters.includes('uncategorized') && styles.activeSegmentText]}>
+              Sem categoria
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+
+      {visibleCategories.map((category) => (
         <TaskCategorySection
           category={category}
           deleteTask={deleteTask}
           key={category.id}
+          onEditTask={onEditTask}
           onOpenTaskDetail={onOpenTaskDetail}
-          tasks={tasks.filter((task) => task.category_id === category.id)}
+          tasks={visibleTasks.filter((task) => task.category_id === category.id)}
           toggleTaskDone={toggleTaskDone}
         />
       ))}
@@ -2532,6 +2836,7 @@ function TasksScreen({
         <TaskCategorySection
           category={null}
           deleteTask={deleteTask}
+          onEditTask={onEditTask}
           onOpenTaskDetail={onOpenTaskDetail}
           tasks={uncategorizedTasks}
           toggleTaskDone={toggleTaskDone}
@@ -2552,19 +2857,75 @@ function TasksScreen({
         isVisible={isCreateModalVisible}
         onClose={onCloseCreateModal}
       />
+      <TaskCategoryCreateModal
+        createCategory={createCategory}
+        isVisible={isCategoryModalVisible}
+        onClose={() => setIsCategoryModalVisible(false)}
+      />
     </View>
+  );
+}
+
+function TaskCategoryCreateModal({
+  createCategory,
+  isVisible,
+  onClose,
+}: {
+  createCategory: (name: string) => Promise<boolean>;
+  isVisible: boolean;
+  onClose: () => void;
+}) {
+  const { styles } = useAppStyles();
+  const [name, setName] = useState('');
+
+  const closeModal = () => {
+    setName('');
+    onClose();
+  };
+
+  const submit = async () => {
+    const didCreate = await createCategory(name);
+    if (didCreate) {
+      closeModal();
+    }
+  };
+
+  return (
+    <Modal animationType="fade" onRequestClose={closeModal} transparent visible={isVisible}>
+      <KeyboardAvoidingView behavior="height" style={styles.modalKeyboardAvoiding}>
+        <View style={styles.centeredModalOverlay}>
+          <View style={styles.centeredModalSheet}>
+            <View style={styles.rowBetween}>
+              <Text style={styles.modalTitle}>Nova categoria</Text>
+              <Pressable onPress={closeModal}>
+                <Text style={styles.modalClose}>x</Text>
+              </Pressable>
+            </View>
+            <Field autoCapitalize="words" onChangeText={setName} placeholder="Nome da categoria" value={name} />
+            <View style={styles.compactButtonStack}>
+              <Button onPress={submit}>Criar categoria</Button>
+              <Button onPress={closeModal} variant="secondary">
+                Cancelar
+              </Button>
+            </View>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
   );
 }
 
 function TaskCategorySection({
   category,
   deleteTask,
+  onEditTask,
   onOpenTaskDetail,
   tasks,
   toggleTaskDone,
 }: {
   category: TaskCategory | null;
   deleteTask: (task: Task) => Promise<void>;
+  onEditTask: (task: Task) => void;
   onOpenTaskDetail: (task: Task) => void;
   tasks: Task[];
   toggleTaskDone: (task: Task) => Promise<void>;
@@ -2588,6 +2949,7 @@ function TaskCategorySection({
         <CompactTaskCard
           deleteTask={deleteTask}
           key={task.id}
+          onEditTask={onEditTask}
           onOpenTaskDetail={onOpenTaskDetail}
           task={task}
           toggleTaskDone={toggleTaskDone}
@@ -2599,16 +2961,19 @@ function TaskCategorySection({
 
 function CompactTaskCard({
   deleteTask,
+  onEditTask,
   onOpenTaskDetail,
   task,
   toggleTaskDone,
 }: {
   deleteTask: (task: Task) => Promise<void>;
+  onEditTask: (task: Task) => void;
   onOpenTaskDetail: (task: Task) => void;
   task: Task;
   toggleTaskDone: (task: Task) => Promise<void>;
 }) {
-  const { styles } = useAppStyles();
+  const { colors, styles } = useAppStyles();
+  const [isActionMenuOpen, setIsActionMenuOpen] = useState(false);
   const isDone = task.status === 'done';
 
   return (
@@ -2617,6 +2982,7 @@ function CompactTaskCard({
       onPress={() => onOpenTaskDetail(task)}
       style={({ pressed }) => [
         styles.compactTaskCard,
+        isActionMenuOpen && styles.compactTaskCardMenuOpen,
         isDone && styles.compactTaskCardDone,
         pressed && styles.pressed,
       ]}
@@ -2640,17 +3006,45 @@ function CompactTaskCard({
         </View>
         <Text style={[styles.compactTaskTitle, isDone && styles.doneText]}>{task.title}</Text>
       </View>
-      <Pressable
-        accessibilityLabel="Excluir tarefa"
-        accessibilityRole="button"
-        onPress={(event) => {
-          event.stopPropagation();
-          confirmDeleteTask(task, deleteTask);
-        }}
-        style={({ pressed }) => [styles.compactTaskMenuButton, pressed && styles.pressed]}
-      >
-        <Text style={styles.compactTaskMenu}>x</Text>
-      </Pressable>
+      <View style={styles.compactTaskActions}>
+        <Pressable
+          accessibilityLabel="Abrir acoes da tarefa"
+          accessibilityRole="button"
+          onPress={(event) => {
+            event.stopPropagation();
+            setIsActionMenuOpen((current) => !current);
+          }}
+          style={({ pressed }) => [styles.compactTaskMenuButton, pressed && styles.pressed]}
+        >
+          <EllipsisVertical color={colors.muted} size={22} strokeWidth={2.6} />
+        </Pressable>
+        {isActionMenuOpen ? (
+          <View style={styles.taskActionMenu}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={(event) => {
+                event.stopPropagation();
+                setIsActionMenuOpen(false);
+                onEditTask(task);
+              }}
+              style={({ pressed }) => [styles.taskActionMenuItem, pressed && styles.pressed]}
+            >
+              <Text style={styles.taskActionMenuText}>Editar</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={(event) => {
+                event.stopPropagation();
+                setIsActionMenuOpen(false);
+                confirmDeleteTask(task, deleteTask);
+              }}
+              style={({ pressed }) => [styles.taskActionMenuItem, pressed && styles.pressed]}
+            >
+              <Text style={styles.taskActionMenuDangerText}>Excluir</Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </View>
     </Pressable>
   );
 }
@@ -2666,7 +3060,7 @@ function TaskCreateModal({
   isVisible: boolean;
   onClose: () => void;
 }) {
-  const { styles } = useAppStyles();
+  const { colors, styles } = useAppStyles();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [selectedDueDate, setSelectedDueDate] = useState<Date | null>(null);
@@ -2677,6 +3071,7 @@ function TaskCreateModal({
   const [categoryId, setCategoryId] = useState<string | null>(categories[0]?.id ?? null);
   const [checklistTitle, setChecklistTitle] = useState('');
   const [draftChecklistItems, setDraftChecklistItems] = useState<string[]>([]);
+  const [isChecklistOpen, setIsChecklistOpen] = useState(false);
   const [notificationSelection, setNotificationSelection] = useState<TaskNotificationSelection>(
     defaultTaskNotificationSelection,
   );
@@ -2698,6 +3093,7 @@ function TaskCreateModal({
     setCategoryId(categories[0]?.id ?? null);
     setChecklistTitle('');
     setDraftChecklistItems([]);
+    setIsChecklistOpen(false);
     setNotificationSelection(defaultTaskNotificationSelection);
   };
 
@@ -2985,24 +3381,414 @@ function TaskCreateModal({
               onChange={(value) => setPriority(value as Priority)}
             />
             <View style={styles.modalFieldGroup}>
-              <Text style={styles.modalLabel}>Checklist interno</Text>
-              {draftChecklistItems.map((item) => (
-                <View key={item} style={styles.draftChecklistRow}>
-                  <Text style={styles.checkbox} />
-                  <Text style={styles.checkText}>{item}</Text>
-                  <Pressable onPress={() => removeDraftChecklistItem(item)}>
-                    <Text style={styles.removeText}>Remover</Text>
-                  </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ expanded: isChecklistOpen }}
+                onPress={() => setIsChecklistOpen((current) => !current)}
+                style={({ pressed }) => [styles.checklistToggleButton, pressed && styles.pressed]}
+              >
+                <View style={styles.checklistToggleContent}>
+                  <Plus color={colors.primary} size={16} strokeWidth={2.4} />
+                  <Text style={styles.checklistToggleText}>
+                    {isChecklistOpen ? 'Ocultar checklist' : 'Adicionar checklist'}
+                  </Text>
                 </View>
-              ))}
-              <View style={styles.inlineForm}>
-                <Field onChangeText={setChecklistTitle} placeholder="Novo item de checklist" value={checklistTitle} />
-                <Button onPress={addDraftChecklistItem} variant="secondary">
-                  Adicionar
-                </Button>
-              </View>
+                {draftChecklistItems.length ? (
+                  <Text style={styles.checklistToggleCount}>{draftChecklistItems.length}</Text>
+                ) : null}
+              </Pressable>
+              {isChecklistOpen ? (
+                <View style={styles.checklistDropdown}>
+                  {draftChecklistItems.map((item) => (
+                    <View key={item} style={styles.draftChecklistRow}>
+                      <Text style={styles.checkbox} />
+                      <Text style={styles.checkText}>{item}</Text>
+                      <Pressable onPress={() => removeDraftChecklistItem(item)}>
+                        <Text style={styles.removeText}>Remover</Text>
+                      </Pressable>
+                    </View>
+                  ))}
+                  <View style={styles.inlineForm}>
+                    <Field onChangeText={setChecklistTitle} placeholder="Novo item de checklist" value={checklistTitle} />
+                    <Button onPress={addDraftChecklistItem} variant="secondary">
+                      Adicionar
+                    </Button>
+                  </View>
+                </View>
+              ) : null}
             </View>
             <Button onPress={submit}>Salvar tarefa</Button>
+            </ScrollView>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+function TaskEditModal({
+  categories,
+  checklistItems,
+  isVisible,
+  onClose,
+  task,
+  updateTask,
+}: {
+  categories: TaskCategory[];
+  checklistItems: ChecklistItem[];
+  isVisible: boolean;
+  onClose: () => void;
+  task: Task | null;
+  updateTask: (input: TaskUpdateInput) => Promise<boolean>;
+}) {
+  const { styles } = useAppStyles();
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [selectedDueDate, setSelectedDueDate] = useState<Date | null>(null);
+  const [hasDueTime, setHasDueTime] = useState(false);
+  const [visiblePicker, setVisiblePicker] = useState<'date' | 'time' | null>(null);
+  const [pickerDraftDate, setPickerDraftDate] = useState(new Date());
+  const [priority, setPriority] = useState<Priority>('medium');
+  const [categoryId, setCategoryId] = useState<string | null>(null);
+  const [draftChecklistItems, setDraftChecklistItems] = useState<TaskChecklistUpdateItem[]>([]);
+  const [checklistTitle, setChecklistTitle] = useState('');
+
+  useEffect(() => {
+    if (!task || !isVisible) {
+      return;
+    }
+
+    const dueDate = task.due_at ? new Date(task.due_at) : null;
+    const normalizedDueDate = dueDate && !Number.isNaN(dueDate.getTime()) ? dueDate : null;
+    setTitle(task.title);
+    setDescription(task.description ?? '');
+    setSelectedDueDate(normalizedDueDate);
+    setHasDueTime(normalizedDueDate ? hasExplicitTaskDueTime(normalizedDueDate) : false);
+    setVisiblePicker(null);
+    setPickerDraftDate(normalizedDueDate ?? new Date());
+    setPriority(task.priority);
+    setCategoryId(task.category_id);
+    setDraftChecklistItems(
+      checklistItems.map((item) => ({
+        id: item.id,
+        isDone: item.is_done,
+        position: item.position,
+        title: item.title,
+      })),
+    );
+    setChecklistTitle('');
+  }, [checklistItems, isVisible, task?.id]);
+
+  if (!task) {
+    return null;
+  }
+
+  const showDatePicker = () => {
+    const nextDraftDate = selectedDueDate ? new Date(selectedDueDate) : new Date();
+    setPickerDraftDate(nextDraftDate);
+    setVisiblePicker('date');
+  };
+
+  const showTimePicker = () => {
+    const nextDraftDate = selectedDueDate ? new Date(selectedDueDate) : new Date();
+    setPickerDraftDate(nextDraftDate);
+    setVisiblePicker('time');
+  };
+
+  const clearDueDate = () => {
+    setSelectedDueDate(null);
+    setHasDueTime(false);
+    setVisiblePicker(null);
+    setPickerDraftDate(new Date());
+  };
+
+  const selectWebDate = (offsetDays: number) => {
+    const base = selectedDueDate ? new Date(selectedDueDate) : new Date();
+    const nextDate = new Date();
+    nextDate.setDate(nextDate.getDate() + offsetDays);
+    base.setFullYear(nextDate.getFullYear(), nextDate.getMonth(), nextDate.getDate());
+    setSelectedDueDate(base);
+    setVisiblePicker(null);
+  };
+
+  const selectWebTime = (hours: number, minutes: number) => {
+    const nextDate = selectedDueDate ? new Date(selectedDueDate) : new Date();
+    nextDate.setHours(hours, minutes, 0, 0);
+    setSelectedDueDate(nextDate);
+    setHasDueTime(true);
+    setVisiblePicker(null);
+  };
+
+  const applyPickerDate = (date: Date, pickerMode: 'date' | 'time') => {
+    if (pickerMode === 'date') {
+      const nextDate = selectedDueDate ? new Date(selectedDueDate) : new Date(date);
+      nextDate.setFullYear(date.getFullYear(), date.getMonth(), date.getDate());
+      setSelectedDueDate(nextDate);
+      return;
+    }
+
+    const nextDate = selectedDueDate ? new Date(selectedDueDate) : new Date();
+    nextDate.setHours(date.getHours(), date.getMinutes(), 0, 0);
+    setSelectedDueDate(nextDate);
+    setHasDueTime(true);
+  };
+
+  const cancelPicker = () => {
+    setVisiblePicker(null);
+    setPickerDraftDate(selectedDueDate ? new Date(selectedDueDate) : new Date());
+  };
+
+  const commitPickerDraft = () => {
+    if (!visiblePicker) {
+      return;
+    }
+
+    applyPickerDate(pickerDraftDate, visiblePicker);
+    setVisiblePicker(null);
+  };
+
+  const onPickerChange = (event: DateTimePickerEvent, date?: Date) => {
+    if (event.type === 'dismissed') {
+      cancelPicker();
+      return;
+    }
+    if (!date || !visiblePicker) {
+      return;
+    }
+
+    setPickerDraftDate(date);
+
+    if (Platform.OS === 'ios') {
+      return;
+    }
+
+    applyPickerDate(date, visiblePicker);
+    setVisiblePicker(null);
+  };
+
+  const closeModal = () => {
+    setVisiblePicker(null);
+    onClose();
+  };
+
+  const addDraftChecklistItem = () => {
+    const normalizedTitle = normalizeChecklistTitle(checklistTitle);
+    if (!normalizedTitle) {
+      return;
+    }
+
+    setDraftChecklistItems((current) =>
+      current.some((item) => item.title.toLocaleLowerCase() === normalizedTitle.toLocaleLowerCase())
+        ? current
+        : [
+            ...current,
+            {
+              id: null,
+              isDone: false,
+              position: current.length + 1,
+              title: normalizedTitle,
+            },
+          ],
+    );
+    setChecklistTitle('');
+  };
+
+  const updateDraftChecklistItem = (index: number, nextTitle: string) => {
+    setDraftChecklistItems((current) =>
+      current.map((item, itemIndex) => (itemIndex === index ? { ...item, title: nextTitle } : item)),
+    );
+  };
+
+  const removeDraftChecklistItem = (index: number) => {
+    setDraftChecklistItems((current) =>
+      current
+        .filter((_, itemIndex) => itemIndex !== index)
+        .map((item, itemIndex) => ({ ...item, position: itemIndex + 1 })),
+    );
+  };
+
+  const submit = async () => {
+    const didUpdate = await updateTask({
+      categoryId,
+      checklistItems: normalizeTaskChecklistUpdateItems(draftChecklistItems),
+      description: description.trim() || null,
+      dueAt: buildTaskDueAt(selectedDueDate, hasDueTime),
+      priority,
+      task,
+      title,
+    });
+
+    if (didUpdate) {
+      closeModal();
+    }
+  };
+
+  return (
+    <Modal animationType="slide" onRequestClose={closeModal} transparent visible={isVisible}>
+      <KeyboardAvoidingView
+        behavior="height"
+        keyboardVerticalOffset={0}
+        style={styles.modalKeyboardAvoiding}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalSheet}>
+            <ScrollView contentContainerStyle={styles.modalSheetContent} keyboardShouldPersistTaps="handled">
+              <View style={styles.rowBetween}>
+                <Text style={styles.modalTitle}>Editar tarefa</Text>
+                <Pressable onPress={closeModal}>
+                  <Text style={styles.modalClose}>x</Text>
+                </Pressable>
+              </View>
+              <Field onChangeText={setTitle} placeholder="Titulo da tarefa" value={title} />
+              <Field
+                multiline
+                onChangeText={setDescription}
+                placeholder="Descricao opcional"
+                style={[styles.textAreaField]}
+                textAlignVertical="top"
+                value={description}
+              />
+              <View style={styles.modalFieldGroup}>
+                <Text style={styles.modalLabel}>Prazo</Text>
+                <Text style={styles.dueSummary}>
+                  {selectedDueDate ? formatCreateDueLabel(selectedDueDate, hasDueTime) : 'Sem data definida'}
+                </Text>
+                <View style={styles.segmented}>
+                  <Pressable onPress={showDatePicker} style={styles.segment}>
+                    <Text style={styles.segmentText}>{selectedDueDate ? 'Alterar data' : 'Escolher data'}</Text>
+                  </Pressable>
+                  <Pressable onPress={showTimePicker} style={styles.segment}>
+                    <Text style={styles.segmentText}>{hasDueTime ? 'Alterar horario' : 'Adicionar horario'}</Text>
+                  </Pressable>
+                  {selectedDueDate ? (
+                    <Pressable onPress={clearDueDate} style={styles.segment}>
+                      <Text style={styles.segmentText}>Limpar prazo</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+                {visiblePicker && Platform.OS === 'web' ? (
+                  <View style={styles.segmented}>
+                    {visiblePicker === 'date' ? (
+                      <>
+                        <Pressable onPress={() => selectWebDate(0)} style={styles.segment}>
+                          <Text style={styles.segmentText}>Hoje</Text>
+                        </Pressable>
+                        <Pressable onPress={() => selectWebDate(1)} style={styles.segment}>
+                          <Text style={styles.segmentText}>Amanha</Text>
+                        </Pressable>
+                        <Pressable onPress={() => selectWebDate(7)} style={styles.segment}>
+                          <Text style={styles.segmentText}>Em 7 dias</Text>
+                        </Pressable>
+                      </>
+                    ) : (
+                      <>
+                        <Pressable onPress={() => selectWebTime(9, 0)} style={styles.segment}>
+                          <Text style={styles.segmentText}>09:00</Text>
+                        </Pressable>
+                        <Pressable onPress={() => selectWebTime(14, 0)} style={styles.segment}>
+                          <Text style={styles.segmentText}>14:00</Text>
+                        </Pressable>
+                        <Pressable onPress={() => selectWebTime(19, 0)} style={styles.segment}>
+                          <Text style={styles.segmentText}>19:00</Text>
+                        </Pressable>
+                      </>
+                    )}
+                  </View>
+                ) : visiblePicker && Platform.OS !== 'ios' ? (
+                  <View style={styles.duePickerBox}>
+                    <View style={styles.duePickerHeader}>
+                      <Text style={styles.duePickerTitle}>
+                        {visiblePicker === 'date' ? 'Escolher data' : 'Escolher horario'}
+                      </Text>
+                      <Pressable accessibilityLabel="Fechar seletor de prazo" accessibilityRole="button" onPress={cancelPicker}>
+                        <Text style={styles.duePickerClose}>x</Text>
+                      </Pressable>
+                    </View>
+                    <DateTimePicker
+                      mode={visiblePicker}
+                      onChange={onPickerChange}
+                      value={pickerDraftDate}
+                    />
+                  </View>
+                ) : null}
+              </View>
+              {visiblePicker && Platform.OS === 'ios' ? (
+                <Modal animationType="fade" onRequestClose={cancelPicker} transparent visible>
+                  <Pressable
+                    accessibilityLabel="Confirmar prazo selecionado"
+                    accessibilityRole="button"
+                    onPress={commitPickerDraft}
+                    style={styles.duePickerBackdrop}
+                  >
+                    <Pressable onPress={(event) => event.stopPropagation()} style={styles.duePickerFloatingBox}>
+                      <View style={styles.duePickerHeader}>
+                        <Text style={styles.duePickerTitle}>
+                          {visiblePicker === 'date' ? 'Escolher data' : 'Escolher horario'}
+                        </Text>
+                        <Pressable accessibilityLabel="Fechar seletor de prazo" accessibilityRole="button" onPress={cancelPicker}>
+                          <Text style={styles.duePickerClose}>x</Text>
+                        </Pressable>
+                      </View>
+                      <DateTimePicker mode={visiblePicker} onChange={onPickerChange} value={pickerDraftDate} />
+                    </Pressable>
+                  </Pressable>
+                </Modal>
+              ) : null}
+              <Text style={styles.modalLabel}>Categoria</Text>
+              <View style={styles.segmented}>
+                {categories.map((category) => (
+                  <Pressable
+                    key={category.id}
+                    onPress={() => setCategoryId(category.id)}
+                    style={[styles.segment, categoryId === category.id && styles.activeSegment]}
+                  >
+                    <Text style={[styles.segmentText, categoryId === category.id && styles.activeSegmentText]}>
+                      {category.name}
+                    </Text>
+                  </Pressable>
+                ))}
+                <Pressable onPress={() => setCategoryId(null)} style={[styles.segment, categoryId === null && styles.activeSegment]}>
+                  <Text style={[styles.segmentText, categoryId === null && styles.activeSegmentText]}>Sem categoria</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.modalLabel}>Prioridade</Text>
+              <SegmentedControl
+                options={[
+                  ['low', 'Baixa'],
+                  ['medium', 'Media'],
+                  ['high', 'Alta'],
+                  ['urgent', 'Urgente'],
+                ]}
+                value={priority}
+                onChange={(value) => setPriority(value as Priority)}
+              />
+              <View style={styles.modalFieldGroup}>
+                <Text style={styles.modalLabel}>Checklist interno</Text>
+                {draftChecklistItems.length ? (
+                  draftChecklistItems.map((item, index) => (
+                    <View key={item.id ?? `draft-${index}`} style={styles.editChecklistRow}>
+                      <Field
+                        onChangeText={(value) => updateDraftChecklistItem(index, value)}
+                        placeholder="Item de checklist"
+                        style={styles.editChecklistField}
+                        value={item.title}
+                      />
+                      <Pressable onPress={() => removeDraftChecklistItem(index)}>
+                        <Text style={styles.removeText}>Remover</Text>
+                      </Pressable>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.dueSummary}>Nenhum item no checklist.</Text>
+                )}
+                <View style={styles.inlineForm}>
+                  <Field onChangeText={setChecklistTitle} placeholder="Novo item de checklist" value={checklistTitle} />
+                  <Button onPress={addDraftChecklistItem} variant="secondary">
+                    Adicionar
+                  </Button>
+                </View>
+              </View>
+              <Button onPress={submit}>Salvar alteracoes</Button>
             </ScrollView>
           </View>
         </View>
@@ -3078,6 +3864,7 @@ function TaskDetailModal({
   isVisible,
   notificationRule,
   onClose,
+  onEditTask,
   task,
   toggleChecklistItem,
   toggleTaskDone,
@@ -3089,6 +3876,7 @@ function TaskDetailModal({
   isVisible: boolean;
   notificationRule: TaskDeadlineNotificationRule | null;
   onClose: () => void;
+  onEditTask: (task: Task) => void;
   task: Task | null;
   toggleChecklistItem: (item: ChecklistItem) => Promise<void>;
   toggleTaskDone: (task: Task) => Promise<void>;
@@ -3153,12 +3941,17 @@ function TaskDetailModal({
               {task.due_at ? <Text style={textStyles.muted}>Prazo: {formatDate(task.due_at)}</Text> : null}
             </View>
 
-            <Button onPress={() => toggleTaskDone(task)} variant={isDone ? 'secondary' : 'primary'}>
-              {isDone ? 'Reabrir tarefa' : 'Marcar como concluida'}
-            </Button>
-            <Button onPress={() => confirmDeleteTask(task, deleteTask)} variant="danger">
-              Excluir tarefa
-            </Button>
+            <View style={styles.taskDetailActions}>
+              <Button onPress={() => toggleTaskDone(task)} variant={isDone ? 'secondary' : 'primary'}>
+                {isDone ? 'Reabrir tarefa' : 'Marcar como concluida'}
+              </Button>
+              <Button onPress={() => onEditTask(task)} variant="secondary">
+                Editar tarefa
+              </Button>
+              <Button onPress={() => confirmDeleteTask(task, deleteTask)} variant="danger">
+                Excluir tarefa
+              </Button>
+            </View>
 
             {task.due_at ? (
               <View style={styles.taskDetailSection}>
@@ -4551,8 +5344,16 @@ function buildTaskDueAt(date: Date | null, hasTime: boolean) {
   return dueAt.toISOString();
 }
 
+function hasExplicitTaskDueTime(date: Date) {
+  return !(date.getHours() === 23 && date.getMinutes() === 59 && date.getSeconds() === 0 && date.getMilliseconds() === 0);
+}
+
 function normalizeChecklistTitle(title: string) {
   return title.trim().replace(/\s+/g, ' ');
+}
+
+function normalizeCategoryName(name: string) {
+  return name.trim().replace(/\s+/g, ' ');
 }
 
 function normalizeChecklistItems(items: string[]) {
@@ -4566,6 +5367,27 @@ function normalizeChecklistItems(items: string[]) {
     if (normalized && !seen.has(key)) {
       seen.add(key);
       normalizedItems.push(normalized);
+    }
+  });
+
+  return normalizedItems;
+}
+
+function normalizeTaskChecklistUpdateItems(items: TaskChecklistUpdateItem[]) {
+  const seen = new Set<string>();
+  const normalizedItems: TaskChecklistUpdateItem[] = [];
+
+  items.forEach((item) => {
+    const title = normalizeChecklistTitle(item.title);
+    const key = title.toLocaleLowerCase();
+
+    if (title && !seen.has(key)) {
+      seen.add(key);
+      normalizedItems.push({
+        ...item,
+        position: normalizedItems.length + 1,
+        title,
+      });
     }
   });
 
@@ -5533,17 +6355,20 @@ function makeStyles(colors: AppColors) {
   },
   productivityCard: {
     backgroundColor: colors.primary,
-    borderRadius: radius.lg,
-    gap: spacing.xs,
-    padding: spacing.xl,
+    borderRadius: radius.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
   },
   productivityLabel: {
     color: colors.surface,
-    fontFamily: fontFamily.black,
+    fontFamily: fontFamily.bold,
     fontSize: 11,
-    fontWeight: '900',
+    fontWeight: '700',
     letterSpacing: 0,
-    opacity: 0.88,
+    opacity: 0.84,
   },
   productivityIcon: {
     color: colors.surface,
@@ -5554,7 +6379,7 @@ function makeStyles(colors: AppColors) {
   productivityValue: {
     color: colors.surface,
     fontFamily: fontFamily.black,
-    fontSize: 40,
+    fontSize: 24,
     fontWeight: '900',
   },
   productivityCopy: {
@@ -5564,8 +6389,29 @@ function makeStyles(colors: AppColors) {
     fontWeight: '700',
     opacity: 0.82,
   },
+  taskFilterPanel: {
+    gap: spacing.sm,
+  },
+  categoryCreateButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    minHeight: 32,
+    paddingHorizontal: spacing.sm,
+  },
+  categoryCreateText: {
+    color: colors.primary,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
+  },
   taskCategoryBlock: {
     gap: spacing.md,
+    position: 'relative',
   },
   taskCategoryHeader: {
     alignItems: 'center',
@@ -5611,7 +6457,14 @@ function makeStyles(colors: AppColors) {
     flexDirection: 'row',
     gap: spacing.md,
     minHeight: 78,
+    overflow: 'visible',
     padding: spacing.lg,
+    position: 'relative',
+    zIndex: 1,
+  },
+  compactTaskCardMenuOpen: {
+    elevation: 16,
+    zIndex: 100,
   },
   compactTaskCardDone: {
     opacity: 0.72,
@@ -5667,6 +6520,41 @@ function makeStyles(colors: AppColors) {
     justifyContent: 'center',
     paddingHorizontal: spacing.xs,
     width: 36,
+  },
+  compactTaskActions: {
+    overflow: 'visible',
+    position: 'relative',
+    zIndex: 101,
+  },
+  taskActionMenu: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    elevation: 18,
+    minWidth: 118,
+    paddingVertical: spacing.xs,
+    position: 'absolute',
+    right: 0,
+    top: 40,
+    zIndex: 102,
+  },
+  taskActionMenuItem: {
+    minHeight: 36,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.md,
+  },
+  taskActionMenuText: {
+    color: colors.text,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
+  },
+  taskActionMenuDangerText: {
+    color: colors.danger,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
   },
   taskInputBar: {
     alignItems: 'center',
@@ -6588,11 +7476,31 @@ function makeStyles(colors: AppColors) {
   inlineForm: {
     gap: spacing.sm,
   },
+  compactButtonStack: {
+    gap: spacing.sm,
+  },
   modalOverlay: {
     backgroundColor: 'rgba(0,0,0,0.45)',
     flex: 1,
     justifyContent: 'flex-end',
     paddingTop: spacing.xl,
+  },
+  centeredModalOverlay: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    flex: 1,
+    justifyContent: 'center',
+    padding: spacing.xl,
+  },
+  centeredModalSheet: {
+    backgroundColor: colors.background,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    gap: spacing.lg,
+    maxWidth: 420,
+    padding: spacing.xl,
+    width: '100%',
   },
   modalKeyboardAvoiding: {
     flex: 1,
@@ -6698,6 +7606,9 @@ function makeStyles(colors: AppColors) {
   taskDetailHeader: {
     gap: spacing.md,
   },
+  taskDetailActions: {
+    gap: spacing.sm,
+  },
   taskDetailTitle: {
     color: colors.text,
     fontFamily: fontFamily.black,
@@ -6744,6 +7655,41 @@ function makeStyles(colors: AppColors) {
     fontSize: typography.small,
     fontWeight: '700',
   },
+  checklistToggleButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    justifyContent: 'space-between',
+    minHeight: 36,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  checklistToggleContent: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  checklistToggleText: {
+    color: colors.primary,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
+  },
+  checklistToggleCount: {
+    color: colors.muted,
+    fontFamily: fontFamily.extraBold,
+    fontSize: typography.small,
+    fontWeight: '800',
+  },
+  checklistDropdown: {
+    gap: spacing.sm,
+    paddingTop: spacing.xs,
+  },
   draftChecklistRow: {
     alignItems: 'center',
     backgroundColor: colors.surface,
@@ -6755,6 +7701,14 @@ function makeStyles(colors: AppColors) {
     minHeight: 44,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
+  },
+  editChecklistRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  editChecklistField: {
+    flex: 1,
   },
   removeText: {
     color: colors.danger,
