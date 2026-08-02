@@ -49,6 +49,8 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-
 import { Button, Card, Field, Pill, SectionTitle, useTextStyles } from './components/ui';
 import {
   demoChecklistItems,
+  demoHabitCheckIns,
+  demoHabits,
   demoTaskCategories,
   demoFolderMembers,
   demoFolderChecklistItems,
@@ -72,6 +74,8 @@ import { isSupabaseConfigured, supabase } from './lib/supabase';
 import {
   cancelLocalReminder,
   cancelLocalReminders,
+  cancelHabitReminders,
+  scheduleHabitReminder,
   scheduleLocalReminder,
   scheduleTaskDeadlineNotifications,
   type TaskDeadlineNotificationInput,
@@ -81,6 +85,10 @@ import { ThemeProvider, useTheme } from './theme/theme-context';
 import type { ReceivedWorkspaceInvitation } from './types/database';
 import type {
   ChecklistItem,
+  Habit,
+  HabitCheckIn,
+  HabitFrequency,
+  HabitWeekday,
   Priority,
   Reminder,
   SharedList,
@@ -102,7 +110,7 @@ import type {
   WorkspaceMember,
 } from './types/domain';
 
-type MainTabKey = 'home' | 'tasks' | 'notes' | 'calendar';
+type MainTabKey = 'home' | 'tasks' | 'habits' | 'notes' | 'calendar';
 type TabKey = MainTabKey | 'profile';
 type UserContext = { id: string; email: string; fullName: string | null };
 type MemberProfile = { email: string; full_name: string | null; id: string };
@@ -115,6 +123,16 @@ type TaskCreateInput = {
   notificationRule: TaskDeadlineNotificationInput | null;
   priority: Priority;
   title: string;
+};
+type HabitInput = {
+  color: string;
+  description: string | null;
+  frequency: HabitFrequency;
+  icon: string;
+  reminderTime: string | null;
+  title: string;
+  weekdays: HabitWeekday[];
+  weeklyGoal: number | null;
 };
 type TaskCategoryFilterKey = 'uncategorized' | string;
 type TaskChecklistUpdateItem = {
@@ -189,6 +207,18 @@ const defaultTaskNotificationSelection: TaskNotificationSelection = {
   customValue: '5',
   optionKey: 'off',
 };
+
+const habitColorOptions = ['#2563eb', '#0f8f62', '#f59e0b', '#ef4444', '#7c3aed', '#0891b2'];
+
+const habitWeekdayOptions: Array<{ label: string; shortLabel: string; value: HabitWeekday }> = [
+  { label: 'D', shortLabel: 'Dom', value: 0 },
+  { label: 'S', shortLabel: 'Seg', value: 1 },
+  { label: 'T', shortLabel: 'Ter', value: 2 },
+  { label: 'Q', shortLabel: 'Qua', value: 3 },
+  { label: 'Q', shortLabel: 'Qui', value: 4 },
+  { label: 'S', shortLabel: 'Sex', value: 5 },
+  { label: 'S', shortLabel: 'Sab', value: 6 },
+];
 
 function getTaskNotificationPresetKey(rule: TaskDeadlineNotificationInput | null | undefined): TaskNotificationOptionKey {
   if (!rule?.enabled) {
@@ -551,6 +581,10 @@ function MainApp({ user }: { user: UserContext }) {
   const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>(
     isSupabaseConfigured ? [] : demoChecklistItems,
   );
+  const [habits, setHabits] = useState<Habit[]>(isSupabaseConfigured ? [] : demoHabits);
+  const [habitCheckIns, setHabitCheckIns] = useState<HabitCheckIn[]>(
+    isSupabaseConfigured ? [] : demoHabitCheckIns,
+  );
   const [workspaces, setWorkspaces] = useState<Workspace[]>(isSupabaseConfigured ? [] : demoWorkspaces);
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>(
     isSupabaseConfigured ? [] : demoWorkspaceMembers,
@@ -668,6 +702,24 @@ function MainApp({ user }: { user: UserContext }) {
     }
   }, []);
 
+  const loadHabitContent = useCallback(async () => {
+    if (!supabase) {
+      return;
+    }
+
+    const [habitResult, checkInResult] = await Promise.all([
+      supabase.from('habits').select('*').order('created_at', { ascending: true }),
+      supabase.from('habit_check_ins').select('*').order('check_date', { ascending: false }),
+    ]);
+
+    if (!habitResult.error) {
+      setHabits(habitResult.data ?? []);
+    }
+    if (!checkInResult.error) {
+      setHabitCheckIns(checkInResult.data ?? []);
+    }
+  }, []);
+
   const loadFolderContent = useCallback(async () => {
     if (!supabase) {
       return;
@@ -733,6 +785,8 @@ function MainApp({ user }: { user: UserContext }) {
       listResult,
       reminderResult,
       taskNotificationResult,
+      habitResult,
+      habitCheckInResult,
     ] = await Promise.all([
       supabase.from('profiles').select('*').eq('id', user.id).maybeSingle(),
       supabase.from('task_categories').select('*').order('position', { ascending: true }),
@@ -751,6 +805,8 @@ function MainApp({ user }: { user: UserContext }) {
       supabase.from('shared_lists').select('*').order('updated_at', { ascending: false }),
       supabase.from('reminders').select('*').order('remind_at', { ascending: true }),
       supabase.from('task_deadline_notifications').select('*'),
+      supabase.from('habits').select('*').order('created_at', { ascending: true }),
+      supabase.from('habit_check_ins').select('*').order('check_date', { ascending: false }),
     ]);
 
     if (profileResult.data) {
@@ -804,6 +860,8 @@ function MainApp({ user }: { user: UserContext }) {
     setLists(listResult.data ?? []);
     setReminders(reminderResult.data ?? []);
     setTaskNotificationRules(taskNotificationResult.data ?? []);
+    setHabits(habitResult.data ?? []);
+    setHabitCheckIns(habitCheckInResult.data ?? []);
 
     const memberIds = Array.from(
       new Set([
@@ -896,6 +954,8 @@ function MainApp({ user }: { user: UserContext }) {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_deadline_notifications' }, loadTaskContent)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_categories' }, loadData)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_checklist_items' }, loadTaskContent)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'habits' }, loadHabitContent)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'habit_check_ins' }, loadHabitContent)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'workspaces' }, loadData)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'workspace_members' }, loadData)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'folder_members' }, loadData)
@@ -915,7 +975,7 @@ function MainApp({ user }: { user: UserContext }) {
     return () => {
       client.removeChannel(channel);
     };
-  }, [loadData, loadFolderContent, loadReceivedInvitations, loadTaskContent]);
+  }, [loadData, loadFolderContent, loadHabitContent, loadReceivedInvitations, loadTaskContent]);
 
   useEffect(() => {
     if (!supabase || activeTab !== 'notes') {
@@ -1756,6 +1816,245 @@ function MainApp({ user }: { user: UserContext }) {
     }
   };
 
+  const createHabit = async (input: HabitInput) => {
+    const title = normalizeHabitTitle(input.title);
+    if (!title) {
+      Alert.alert('Habito', 'Informe um nome para a rotina.');
+      return false;
+    }
+    const normalizedWeekdays = input.frequency === 'weekdays' ? normalizeHabitWeekdays(input.weekdays) : [];
+
+    const localId = `habit-${Date.now()}`;
+
+    if (!supabase) {
+      const notificationIds =
+        notificationsEnabled && input.reminderTime
+          ? await scheduleHabitReminder(localId, title, input.reminderTime)
+          : [];
+      const now = new Date().toISOString();
+      setHabits((current) => [
+        ...current,
+        {
+          id: localId,
+          owner_id: user.id,
+          title,
+          description: input.description,
+          frequency: input.frequency,
+          weekdays: normalizedWeekdays,
+          weekly_goal: input.frequency === 'weekly_goal' ? input.weeklyGoal : null,
+          reminder_time: input.reminderTime,
+          reminder_notification_ids: notificationIds,
+          color: input.color,
+          icon: input.icon,
+          is_active: true,
+          created_at: now,
+          updated_at: now,
+        },
+      ]);
+      return true;
+    }
+
+    const { data, error } = await supabase
+      .from('habits')
+      .insert({
+        owner_id: user.id,
+        title,
+        description: input.description,
+        frequency: input.frequency,
+        weekdays: normalizedWeekdays,
+        weekly_goal: input.frequency === 'weekly_goal' ? input.weeklyGoal : null,
+        reminder_time: input.reminderTime,
+        reminder_notification_ids: [],
+        color: input.color,
+        icon: input.icon,
+        is_active: true,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      Alert.alert('Erro ao criar habito', error.message);
+      return false;
+    }
+
+    if (data && notificationsEnabled && input.reminderTime) {
+      const rescheduledIds = await scheduleHabitReminder(data.id, title, input.reminderTime);
+      const updateResult = await supabase
+        .from('habits')
+        .update({ reminder_notification_ids: rescheduledIds })
+        .eq('id', data.id);
+      if (updateResult.error) {
+        Alert.alert('Habito criado', `Nao foi possivel sincronizar os alertas agora: ${updateResult.error.message}`);
+      }
+    }
+
+    await loadHabitContent();
+    return true;
+  };
+
+  const updateHabit = async (habit: Habit, input: HabitInput) => {
+    const title = normalizeHabitTitle(input.title);
+    if (!title) {
+      Alert.alert('Habito', 'Informe um nome para a rotina.');
+      return false;
+    }
+    const normalizedWeekdays = input.frequency === 'weekdays' ? normalizeHabitWeekdays(input.weekdays) : [];
+
+    await cancelHabitReminders(habit.reminder_notification_ids);
+    const notificationIds =
+      notificationsEnabled && input.reminderTime
+        ? await scheduleHabitReminder(habit.id, title, input.reminderTime)
+        : [];
+
+    const nextHabit: Habit = {
+      ...habit,
+      title,
+      description: input.description,
+      frequency: input.frequency,
+      weekdays: normalizedWeekdays,
+      weekly_goal: input.frequency === 'weekly_goal' ? input.weeklyGoal : null,
+      reminder_time: input.reminderTime,
+      reminder_notification_ids: notificationIds,
+      color: input.color,
+      icon: input.icon,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (!supabase) {
+      setHabits((current) => current.map((entry) => (entry.id === habit.id ? nextHabit : entry)));
+      return true;
+    }
+
+    const { error } = await supabase
+      .from('habits')
+      .update({
+        title,
+        description: input.description,
+        frequency: input.frequency,
+        weekdays: normalizedWeekdays,
+        weekly_goal: input.frequency === 'weekly_goal' ? input.weeklyGoal : null,
+        reminder_time: input.reminderTime,
+        reminder_notification_ids: notificationIds,
+        color: input.color,
+        icon: input.icon,
+      })
+      .eq('id', habit.id);
+
+    if (error) {
+      await cancelHabitReminders(notificationIds);
+      Alert.alert('Erro ao atualizar habito', error.message);
+      return false;
+    }
+
+    setHabits((current) => current.map((entry) => (entry.id === habit.id ? nextHabit : entry)));
+    return true;
+  };
+
+  const archiveHabit = async (habit: Habit) => {
+    await cancelHabitReminders(habit.reminder_notification_ids);
+    const nextHabit = {
+      ...habit,
+      is_active: false,
+      reminder_notification_ids: [],
+      updated_at: new Date().toISOString(),
+    };
+
+    if (!supabase) {
+      setHabits((current) => current.map((entry) => (entry.id === habit.id ? nextHabit : entry)));
+      return true;
+    }
+
+    const { error } = await supabase
+      .from('habits')
+      .update({ is_active: false, reminder_notification_ids: [] })
+      .eq('id', habit.id);
+    if (error) {
+      Alert.alert('Erro ao arquivar habito', error.message);
+      return false;
+    }
+
+    setHabits((current) => current.map((entry) => (entry.id === habit.id ? nextHabit : entry)));
+    return true;
+  };
+
+  const deleteHabit = async (habit: Habit) => {
+    await cancelHabitReminders(habit.reminder_notification_ids);
+    const previousHabits = habits;
+    const previousCheckIns = habitCheckIns;
+    setHabits((current) => current.filter((entry) => entry.id !== habit.id));
+    setHabitCheckIns((current) => current.filter((checkIn) => checkIn.habit_id !== habit.id));
+
+    if (!supabase) {
+      return true;
+    }
+
+    const { error } = await supabase.from('habits').delete().eq('id', habit.id);
+    if (error) {
+      setHabits(previousHabits);
+      setHabitCheckIns(previousCheckIns);
+      Alert.alert('Erro ao excluir habito', error.message);
+      return false;
+    }
+
+    return true;
+  };
+
+  const toggleHabitCheckIn = async (habit: Habit, dateKey = getLocalDateKey(new Date())) => {
+    const existing = habitCheckIns.find((checkIn) => checkIn.habit_id === habit.id && checkIn.check_date === dateKey);
+    const optimisticCheckIn: HabitCheckIn = {
+      id: `habit-check-${Date.now()}`,
+      habit_id: habit.id,
+      owner_id: user.id,
+      check_date: dateKey,
+      created_at: new Date().toISOString(),
+    };
+
+    if (existing) {
+      setHabitCheckIns((current) => current.filter((checkIn) => checkIn.id !== existing.id));
+    } else {
+      setHabitCheckIns((current) => [optimisticCheckIn, ...current]);
+    }
+
+    if (!supabase) {
+      return;
+    }
+
+    if (existing) {
+      const { error } = await supabase.from('habit_check_ins').delete().eq('id', existing.id);
+      if (error) {
+        setHabitCheckIns((current) => [existing, ...current]);
+        Alert.alert('Erro ao atualizar habito', error.message);
+      }
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('habit_check_ins')
+      .insert({
+        habit_id: habit.id,
+        owner_id: user.id,
+        check_date: dateKey,
+      })
+      .select()
+      .single();
+    if (error) {
+      setHabitCheckIns((current) =>
+        current.filter((checkIn) => !(checkIn.habit_id === habit.id && checkIn.check_date === dateKey)),
+      );
+      Alert.alert('Erro ao marcar habito', error.message);
+      return;
+    }
+
+    if (data) {
+      setHabitCheckIns((current) =>
+        [
+          data,
+          ...current.filter((checkIn) => !(checkIn.habit_id === habit.id && checkIn.check_date === dateKey)),
+        ],
+      );
+    }
+  };
+
   const createWorkspaceFolder = async (name: string) => {
     if (!name.trim()) {
       return;
@@ -2331,8 +2630,12 @@ function MainApp({ user }: { user: UserContext }) {
 
     if (!enabled) {
       await Promise.all(taskNotificationRules.map((rule) => cancelLocalReminders(rule.notification_ids)));
+      await Promise.all(habits.map((habit) => cancelHabitReminders(habit.reminder_notification_ids)));
       setTaskNotificationRules((current) =>
         current.map((rule) => ({ ...rule, notification_ids: [], updated_at: new Date().toISOString() })),
+      );
+      setHabits((current) =>
+        current.map((habit) => ({ ...habit, reminder_notification_ids: [], updated_at: new Date().toISOString() })),
       );
     } else {
       const openTasksById = new Map(tasks.filter((task) => task.status !== 'done').map((task) => [task.id, task]));
@@ -2340,6 +2643,15 @@ function MainApp({ user }: { user: UserContext }) {
         const task = openTasksById.get(rule.task_id);
         if (task && rule.enabled) {
           await persistTaskNotificationRule(task, rule, rule, true);
+        }
+      }
+      for (const habit of habits.filter((entry) => entry.is_active && entry.reminder_time)) {
+        const notificationIds = await scheduleHabitReminder(habit.id, habit.title, habit.reminder_time);
+        setHabits((current) =>
+          current.map((entry) => (entry.id === habit.id ? { ...entry, reminder_notification_ids: notificationIds } : entry)),
+        );
+        if (supabase) {
+          await supabase.from('habits').update({ reminder_notification_ids: notificationIds }).eq('id', habit.id);
         }
       }
     }
@@ -2360,6 +2672,13 @@ function MainApp({ user }: { user: UserContext }) {
         .eq('owner_id', user.id);
       if (clearResult.error) {
         Alert.alert('Notificacoes canceladas neste aparelho', `Nao foi possivel sincronizar os IDs agora: ${clearResult.error.message}`);
+      }
+      const clearHabitResult = await supabase
+        .from('habits')
+        .update({ reminder_notification_ids: [] })
+        .eq('owner_id', user.id);
+      if (clearHabitResult.error) {
+        Alert.alert('Notificacoes canceladas neste aparelho', `Nao foi possivel sincronizar os alertas de habitos agora: ${clearHabitResult.error.message}`);
       }
     }
   };
@@ -2455,6 +2774,20 @@ function MainApp({ user }: { user: UserContext }) {
           />
         ) : null}
 
+        {activeTab === 'habits' ? (
+          <HabitsScreen
+            archiveHabit={archiveHabit}
+            createHabit={createHabit}
+            deleteHabit={deleteHabit}
+            habitCheckIns={habitCheckIns}
+            habits={habits}
+            onOpenProfile={openProfile}
+            toggleHabitCheckIn={toggleHabitCheckIn}
+            updateHabit={updateHabit}
+            user={effectiveUser}
+          />
+        ) : null}
+
         {activeTab === 'tasks' ? (
           <TasksScreen
             categories={taskCategories}
@@ -2512,7 +2845,6 @@ function MainApp({ user }: { user: UserContext }) {
 
         {activeTab === 'calendar' ? (
           <CalendarScreen
-            reminders={reminders}
             tasks={tasks}
             user={effectiveUser}
             onOpenProfile={openProfile}
@@ -2521,6 +2853,8 @@ function MainApp({ user }: { user: UserContext }) {
 
         {activeTab === 'profile' ? (
           <ProfileScreen
+            habits={habits}
+            habitCheckIns={habitCheckIns}
             onBack={() => setActiveTab(lastMainTab)}
             onSignOut={signOut}
             themeKey={themeKey}
@@ -2665,6 +2999,575 @@ function HomeScreen({
   );
 }
 
+function HabitsScreen({
+  archiveHabit,
+  createHabit,
+  deleteHabit,
+  habitCheckIns,
+  habits,
+  onOpenProfile,
+  toggleHabitCheckIn,
+  updateHabit,
+  user,
+}: {
+  archiveHabit: (habit: Habit) => Promise<boolean>;
+  createHabit: (input: HabitInput) => Promise<boolean>;
+  deleteHabit: (habit: Habit) => Promise<boolean>;
+  habitCheckIns: HabitCheckIn[];
+  habits: Habit[];
+  onOpenProfile: () => void;
+  toggleHabitCheckIn: (habit: Habit, dateKey?: string) => Promise<void>;
+  updateHabit: (habit: Habit, input: HabitInput) => Promise<boolean>;
+  user: UserContext;
+}) {
+  const { styles } = useAppStyles();
+  const [isHabitModalVisible, setIsHabitModalVisible] = useState(false);
+  const [editingHabit, setEditingHabit] = useState<Habit | null>(null);
+  const [showInactiveHabits, setShowInactiveHabits] = useState(false);
+  const today = new Date();
+  const todayKey = getLocalDateKey(today);
+  const activeHabits = habits.filter((habit) => habit.is_active);
+  const inactiveHabits = habits.filter((habit) => !habit.is_active);
+  const todaysHabits = getHabitsForDate(habits, habitCheckIns, today);
+  const doneHabitIds = new Set(
+    habitCheckIns.filter((checkIn) => checkIn.check_date === todayKey).map((checkIn) => checkIn.habit_id),
+  );
+  const doneHabitsToday = todaysHabits.filter((habit) => doneHabitIds.has(habit.id)).length;
+  const habitStreak = calculateHabitStreak(habits, habitCheckIns);
+  const weeklyConsistency = calculateHabitConsistency(habits, habitCheckIns, today);
+
+  const openHabitModal = (habit: Habit | null = null) => {
+    setEditingHabit(habit);
+    setIsHabitModalVisible(true);
+  };
+
+  const closeHabitModal = () => {
+    setEditingHabit(null);
+    setIsHabitModalVisible(false);
+  };
+
+  const submitHabit = async (input: HabitInput) => {
+    const didSave = editingHabit ? await updateHabit(editingHabit, input) : await createHabit(input);
+    if (didSave) {
+      closeHabitModal();
+    }
+  };
+
+  const confirmArchiveHabit = (habit: Habit) => {
+    Alert.alert('Finalizar habito?', 'O historico sera preservado, mas ele ficara inativo e saira da rotina diaria.', [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Finalizar',
+        style: 'destructive',
+        onPress: async () => {
+          await archiveHabit(habit);
+          closeHabitModal();
+        },
+      },
+    ]);
+  };
+
+  const confirmDeleteHabit = (habit: Habit) => {
+    Alert.alert('Excluir habito definitivamente?', 'Esta acao remove o habito e todo o historico de check-ins.', [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Excluir',
+        style: 'destructive',
+        onPress: async () => {
+          await deleteHabit(habit);
+        },
+      },
+    ]);
+  };
+
+  const openHabitActions = (habit: Habit) => {
+    Alert.alert(habit.title, 'Escolha uma acao para este habito.', [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Editar habito',
+        onPress: () => openHabitModal(habit),
+      },
+      {
+        text: 'Finalizar habito',
+        style: 'destructive',
+        onPress: () => confirmArchiveHabit(habit),
+      },
+    ]);
+  };
+
+  return (
+    <View style={styles.habitsScreen}>
+      <AppHeader onOpenProfile={onOpenProfile} user={user} />
+
+      <View style={styles.habitsHero}>
+        <View style={styles.rowBetween}>
+          <View style={styles.flex}>
+            <Text style={styles.notesTitle}>Habitos</Text>
+            <Text style={styles.heroCopy}>Acompanhe suas rotinas e veja a evolucao com clareza.</Text>
+          </View>
+          <Pressable
+            accessibilityLabel="Criar habito"
+            accessibilityRole="button"
+            onPress={() => openHabitModal()}
+            style={({ pressed }) => [styles.smallIconButton, pressed && styles.pressed]}
+          >
+            <Plus color="#ffffff" size={18} strokeWidth={2.6} />
+          </Pressable>
+        </View>
+      </View>
+
+      <View style={styles.habitMetricGrid}>
+        <HabitMetricCard label="ativos" value={activeHabits.length} />
+        <HabitMetricCard label="hoje" value={`${doneHabitsToday}/${todaysHabits.length}`} />
+        <HabitMetricCard label="sequencia" value={habitStreak} />
+        <HabitMetricCard label="semana" value={`${weeklyConsistency}%`} />
+      </View>
+
+      <View style={styles.dashboardCard}>
+        <SectionTitle muted={`${doneHabitsToday} de ${todaysHabits.length} concluidos`}>Hoje</SectionTitle>
+        {todaysHabits.length ? (
+          todaysHabits.map((habit) => (
+            <HabitTodayCard
+              checked={doneHabitIds.has(habit.id)}
+              habit={habit}
+              key={habit.id}
+              onEdit={() => openHabitModal(habit)}
+              onToggle={() => toggleHabitCheckIn(habit, todayKey)}
+            />
+          ))
+        ) : (
+          <View style={styles.emptyTodayCard}>
+            <Text style={styles.itemTitle}>Nenhuma rotina para hoje</Text>
+            <Text style={styles.mutedText}>Crie um habito diario, por dias da semana ou com meta semanal.</Text>
+          </View>
+        )}
+      </View>
+
+      <HabitCharts habits={habits} habitCheckIns={habitCheckIns} />
+
+      <View style={styles.dashboardCard}>
+        <View style={styles.rowBetween}>
+          <SectionTitle muted={`${activeHabits.length} ativo(s)`}>Todos os habitos</SectionTitle>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setShowInactiveHabits((current) => !current)}
+            style={({ pressed }) => [styles.inactiveToggleButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.inactiveToggleText}>
+              {showInactiveHabits ? 'Ocultar inativos' : `Inativos (${inactiveHabits.length})`}
+            </Text>
+          </Pressable>
+        </View>
+        {activeHabits.length ? (
+          activeHabits.map((habit) => (
+            <HabitManagementCard
+              habit={habit}
+              key={habit.id}
+              onActions={() => openHabitActions(habit)}
+            />
+          ))
+        ) : (
+          <Text style={styles.mutedText}>Nenhum habito ativo no momento.</Text>
+        )}
+      </View>
+
+      {showInactiveHabits ? (
+        <View style={styles.dashboardCard}>
+          <SectionTitle muted={`${inactiveHabits.length} finalizado(s)`}>Habitos inativos</SectionTitle>
+          {inactiveHabits.length ? (
+            inactiveHabits.map((habit) => (
+              <InactiveHabitCard
+                habit={habit}
+                key={habit.id}
+                onDelete={() => confirmDeleteHabit(habit)}
+              />
+            ))
+          ) : (
+            <Text style={styles.mutedText}>Nenhum habito inativo para mostrar.</Text>
+          )}
+        </View>
+      ) : null}
+
+      <HabitModal
+        habit={editingHabit}
+        onArchive={editingHabit ? () => confirmArchiveHabit(editingHabit) : undefined}
+        onClose={closeHabitModal}
+        onSubmit={submitHabit}
+        visible={isHabitModalVisible}
+      />
+    </View>
+  );
+}
+
+function HabitMetricCard({ label, value }: { label: string; value: number | string }) {
+  const { styles } = useAppStyles();
+
+  return (
+    <View style={styles.habitMetricCard}>
+      <Text style={styles.profileStatValue}>{value}</Text>
+      <Text style={styles.profileStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function HabitCharts({ habitCheckIns, habits }: { habitCheckIns: HabitCheckIn[]; habits: Habit[] }) {
+  const { styles } = useAppStyles();
+  const weekStats = getHabitDailyStats(habits, habitCheckIns, 7);
+  const monthStats = getHabitDailyStats(habits, habitCheckIns, 30);
+  const monthlyCells = getMonthHabitCells(habits, habitCheckIns, new Date());
+  const maxWeekExpected = Math.max(1, ...weekStats.map((day) => day.expected));
+  const activeHabits = habits.filter((habit) => habit.is_active);
+
+  return (
+    <View style={styles.dashboardCard}>
+      <SectionTitle muted="Ultimos 7 e 30 dias">Evolucao</SectionTitle>
+
+      <View style={styles.weekChartRow}>
+        {weekStats.map((day) => (
+          <View key={day.dateKey} style={styles.weekChartDay}>
+            <View style={styles.weekBarTrack}>
+              <View style={[styles.weekBarExpected, { height: `${Math.max(8, (day.expected / maxWeekExpected) * 100)}%` }]} />
+              <View style={[styles.weekBarDone, { height: `${day.expected ? (day.done / maxWeekExpected) * 100 : 0}%` }]} />
+            </View>
+            <Text style={styles.weekChartLabel}>{day.label}</Text>
+          </View>
+        ))}
+      </View>
+
+      <View style={styles.lineChart}>
+        {monthStats.map((day) => (
+          <View key={day.dateKey} style={styles.lineChartPointWrap}>
+            <View style={[styles.lineChartPoint, { height: `${Math.max(4, day.percent)}%` }]} />
+          </View>
+        ))}
+      </View>
+
+      <View style={styles.heatmapGrid}>
+        {monthlyCells.map((cell) => (
+          <View
+            key={cell.dateKey}
+            style={[
+              styles.heatmapCell,
+              cell.percent >= 80
+                ? styles.heatmapCellStrong
+                : cell.percent >= 50
+                  ? styles.heatmapCellMedium
+                  : cell.percent > 0
+                    ? styles.heatmapCellSoft
+                    : null,
+            ]}
+          />
+        ))}
+      </View>
+
+      <View style={styles.habitSummaryList}>
+        {activeHabits.map((habit) => {
+          const rate = calculateHabitCompletionRate(habit, habitCheckIns, 30);
+          return (
+            <View key={habit.id} style={styles.habitSummaryRow}>
+              <View style={[styles.habitColorDot, { backgroundColor: habit.color }]} />
+              <Text style={styles.habitSummaryTitle}>{habit.title}</Text>
+              <View style={styles.habitSummaryTrack}>
+                <View style={[styles.habitSummaryFill, { width: `${rate}%` }]} />
+              </View>
+              <Text style={styles.habitSummaryRate}>{rate}%</Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function HabitTodayCard({
+  checked,
+  habit,
+  onEdit,
+  onToggle,
+}: {
+  checked: boolean;
+  habit: Habit;
+  onEdit: () => void;
+  onToggle: () => void;
+}) {
+  const { colors, styles } = useAppStyles();
+
+  return (
+    <View style={styles.habitCard}>
+      <Pressable
+        accessibilityLabel={checked ? `Desmarcar ${habit.title}` : `Marcar ${habit.title}`}
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked }}
+        onPress={onToggle}
+        style={({ pressed }) => [
+          styles.habitCheckButton,
+          checked && styles.habitCheckButtonDone,
+          pressed && styles.pressed,
+        ]}
+      >
+        {checked ? <Check color="#ffffff" size={18} strokeWidth={3} /> : null}
+      </Pressable>
+      <Pressable accessibilityRole="button" onPress={onEdit} style={({ pressed }) => [styles.flex, pressed && styles.pressed]}>
+        <Text style={[styles.habitTitle, checked && styles.habitTitleDone]}>{habit.title}</Text>
+        <Text style={styles.habitMeta}>{getHabitFrequencyLabel(habit)}</Text>
+      </Pressable>
+      <View style={[styles.habitColorDot, { backgroundColor: habit.color || colors.primary }]} />
+    </View>
+  );
+}
+
+function HabitManagementCard({
+  habit,
+  onActions,
+}: {
+  habit: Habit;
+  onActions: () => void;
+}) {
+  const { colors, styles } = useAppStyles();
+
+  return (
+    <View style={styles.habitCard}>
+      <View style={[styles.habitColorDot, { backgroundColor: habit.color || colors.primary }]} />
+      <View style={styles.flex}>
+        <Text style={styles.habitTitle}>{habit.title}</Text>
+        <Text style={styles.habitMeta}>{getHabitFrequencyLabel(habit)}</Text>
+      </View>
+      <Pressable
+        accessibilityLabel={`Abrir acoes de ${habit.title}`}
+        accessibilityRole="button"
+        onPress={onActions}
+        style={({ pressed }) => [styles.habitActionsButton, pressed && styles.pressed]}
+      >
+        <EllipsisVertical color={colors.muted} size={20} strokeWidth={2.5} />
+      </Pressable>
+    </View>
+  );
+}
+
+function InactiveHabitCard({
+  habit,
+  onDelete,
+}: {
+  habit: Habit;
+  onDelete: () => void;
+}) {
+  const { styles } = useAppStyles();
+
+  return (
+    <View style={[styles.habitCard, styles.inactiveHabitCard]}>
+      <View style={[styles.habitColorDot, { backgroundColor: habit.color }]} />
+      <View style={styles.flex}>
+        <Text style={styles.habitTitle}>{habit.title}</Text>
+        <Text style={styles.habitMeta}>Finalizado - {getHabitFrequencyLabel(habit)}</Text>
+      </View>
+      <Pressable
+        accessibilityLabel={`Excluir definitivamente ${habit.title}`}
+        accessibilityRole="button"
+        onPress={onDelete}
+        style={({ pressed }) => [styles.deleteHabitButton, pressed && styles.pressed]}
+      >
+        <Text style={styles.deleteHabitText}>Excluir</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function HabitModal({
+  habit,
+  onArchive,
+  onClose,
+  onSubmit,
+  visible,
+}: {
+  habit: Habit | null;
+  onArchive?: () => void;
+  onClose: () => void;
+  onSubmit: (input: HabitInput) => Promise<void>;
+  visible: boolean;
+}) {
+  const { colors, styles } = useAppStyles();
+  const insets = useSafeAreaInsets();
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [frequency, setFrequency] = useState<HabitFrequency>('daily');
+  const [weekdays, setWeekdays] = useState<HabitWeekday[]>([1, 2, 3, 4, 5]);
+  const [weeklyGoal, setWeeklyGoal] = useState('3');
+  const [reminderTime, setReminderTime] = useState('');
+  const [color, setColor] = useState(habitColorOptions[0]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+
+    setTitle(habit?.title ?? '');
+    setDescription(habit?.description ?? '');
+    setFrequency(habit?.frequency ?? 'daily');
+    setWeekdays(habit?.weekdays?.length ? habit.weekdays : [1, 2, 3, 4, 5]);
+    setWeeklyGoal(String(habit?.weekly_goal ?? 3));
+    setReminderTime(habit?.reminder_time?.slice(0, 5) ?? '');
+    setColor(habit?.color ?? habitColorOptions[0]);
+  }, [habit, visible]);
+
+  const toggleWeekday = (weekday: HabitWeekday) => {
+    setWeekdays((current) =>
+      current.includes(weekday)
+        ? current.filter((item) => item !== weekday)
+        : [...current, weekday].sort((a, b) => a - b),
+    );
+  };
+
+  const submit = async () => {
+    const normalizedTime = normalizeReminderTime(reminderTime);
+    if (reminderTime.trim() && !normalizedTime) {
+      Alert.alert('Horario invalido', 'Use o formato HH:mm, por exemplo 08:30.');
+      return;
+    }
+
+    const normalizedWeeklyGoal = normalizeWeeklyGoal(weeklyGoal);
+    if (frequency === 'weekly_goal' && !normalizedWeeklyGoal) {
+      Alert.alert('Meta semanal', 'Informe uma meta entre 1 e 7 vezes por semana.');
+      return;
+    }
+
+    if (frequency === 'weekdays' && !weekdays.length) {
+      Alert.alert('Dias da semana', 'Escolha pelo menos um dia para esta rotina.');
+      return;
+    }
+
+    setSaving(true);
+    await onSubmit({
+      color,
+      description: description.trim() || null,
+      frequency,
+      icon: habit?.icon ?? 'sparkles',
+      reminderTime: normalizedTime,
+      title,
+      weekdays: frequency === 'weekdays' ? weekdays : [],
+      weeklyGoal: frequency === 'weekly_goal' ? normalizedWeeklyGoal : null,
+    });
+    setSaving(false);
+  };
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} transparent visible={visible}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? spacing.lg : 0}
+        style={styles.modalKeyboardAvoiding}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
+            <ScrollView contentContainerStyle={styles.modalSheetContent} keyboardShouldPersistTaps="handled">
+              <View style={styles.rowBetween}>
+                <Text style={styles.modalTitle}>{habit ? 'Editar habito' : 'Novo habito'}</Text>
+                <Pressable accessibilityLabel="Fechar habito" accessibilityRole="button" disabled={saving} onPress={onClose}>
+                  <Text style={styles.modalClose}>x</Text>
+                </Pressable>
+              </View>
+
+              <Field autoCapitalize="sentences" onChangeText={setTitle} placeholder="Nome da rotina" value={title} />
+              <Field
+                multiline
+                onChangeText={setDescription}
+                placeholder="Descricao opcional"
+                style={styles.textAreaField}
+                value={description}
+              />
+
+              <SectionTitle muted="Como ela se repete">Frequencia</SectionTitle>
+              <SegmentedControl
+                disabled={saving}
+                onChange={(value) => setFrequency(value as HabitFrequency)}
+                options={[
+                  ['daily', 'Diaria'],
+                  ['weekdays', 'Dias'],
+                  ['weekly_goal', 'Meta'],
+                ]}
+                value={frequency}
+              />
+
+              {frequency === 'weekdays' ? (
+                <View style={styles.weekdayPicker}>
+                  {habitWeekdayOptions.map((option) => {
+                    const selected = weekdays.includes(option.value);
+                    return (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityState={{ selected }}
+                        disabled={saving}
+                        key={option.value}
+                        onPress={() => toggleWeekday(option.value)}
+                        style={({ pressed }) => [
+                          styles.weekdayButton,
+                          selected && styles.weekdayButtonActive,
+                          pressed && !saving && styles.pressed,
+                        ]}
+                      >
+                        <Text style={[styles.weekdayButtonText, selected && styles.weekdayButtonTextActive]}>
+                          {option.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : null}
+
+              {frequency === 'weekly_goal' ? (
+                <Field
+                  keyboardType="number-pad"
+                  onChangeText={setWeeklyGoal}
+                  placeholder="Vezes por semana"
+                  value={weeklyGoal}
+                />
+              ) : null}
+
+              <SectionTitle muted="Opcional">Lembrete</SectionTitle>
+              <Field keyboardType="numbers-and-punctuation" onChangeText={setReminderTime} placeholder="HH:mm" value={reminderTime} />
+
+              <SectionTitle muted="Destaque visual">Cor</SectionTitle>
+              <View style={styles.habitColorGrid}>
+                {habitColorOptions.map((option) => {
+                  const selected = color === option;
+                  return (
+                    <Pressable
+                      accessibilityLabel={`Selecionar cor ${option}`}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                      key={option}
+                      onPress={() => setColor(option)}
+                      style={({ pressed }) => [
+                        styles.habitColorButton,
+                        { backgroundColor: option, borderColor: selected ? colors.text : option },
+                        pressed && styles.pressed,
+                      ]}
+                    />
+                  );
+                })}
+              </View>
+
+              <View style={styles.profileModalActions}>
+                {habit && onArchive ? (
+                  <Button disabled={saving} onPress={onArchive} variant="danger">
+                    Finalizar
+                  </Button>
+                ) : null}
+                <Button disabled={saving} onPress={onClose} variant="secondary">
+                  Cancelar
+                </Button>
+                <Button disabled={saving} onPress={submit}>
+                  {saving ? 'Salvando...' : 'Salvar'}
+                </Button>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 function PriorityPreviewCard({ task }: { task: Task }) {
   const { styles } = useAppStyles();
 
@@ -2733,6 +3636,7 @@ function TabBar({
   const tabs: Array<{ key: MainTabKey; label: string; Icon: LucideIcon }> = [
     { key: 'home', label: 'Home', Icon: HomeIcon },
     { key: 'tasks', label: 'Tarefas', Icon: ListTodo },
+    { key: 'habits', label: 'Hábitos', Icon: Sparkles },
     { key: 'notes', label: 'Planos', Icon: FolderKanban },
     { key: 'calendar', label: 'Calendário', Icon: CalendarDays },
   ];
@@ -4164,6 +5068,8 @@ function TaskDetailModal({
 }
 
 function ProfileScreen({
+  habitCheckIns,
+  habits,
   notificationsEnabled,
   onBack,
   onSignOut,
@@ -4173,6 +5079,8 @@ function ProfileScreen({
   updateProfileName,
   user,
 }: {
+  habitCheckIns: HabitCheckIn[];
+  habits: Habit[];
   notificationsEnabled: boolean;
   onBack: () => void;
   onSignOut: () => Promise<void>;
@@ -4188,6 +5096,9 @@ function ProfileScreen({
   const [isNameModalVisible, setIsNameModalVisible] = useState(false);
   const [saving, setSaving] = useState(false);
   const displayName = user.fullName ?? getFirstName(user);
+  const activeHabits = habits.filter((habit) => habit.is_active);
+  const habitStreak = calculateHabitStreak(habits, habitCheckIns);
+  const weeklyConsistency = calculateHabitConsistency(habits, habitCheckIns, new Date());
 
   useEffect(() => {
     if (!isNameModalVisible) {
@@ -4256,6 +5167,24 @@ function ProfileScreen({
           >
             <Pencil color={colors.primary} size={18} strokeWidth={2.5} />
           </Pressable>
+        </View>
+      </Card>
+
+      <Card>
+        <SectionTitle muted="Rotinas pessoais">Habitos</SectionTitle>
+        <View style={styles.profileStatsGrid}>
+          <View style={styles.profileStatCard}>
+            <Text style={styles.profileStatValue}>{activeHabits.length}</Text>
+            <Text style={styles.profileStatLabel}>ativos</Text>
+          </View>
+          <View style={styles.profileStatCard}>
+            <Text style={styles.profileStatValue}>{habitStreak}</Text>
+            <Text style={styles.profileStatLabel}>dias seguidos</Text>
+          </View>
+          <View style={styles.profileStatCard}>
+            <Text style={styles.profileStatValue}>{weeklyConsistency}%</Text>
+            <Text style={styles.profileStatLabel}>semana</Text>
+          </View>
         </View>
       </Card>
 
@@ -5180,12 +6109,10 @@ function SharedListCard({
 }
 
 function CalendarScreen({
-  reminders,
   onOpenProfile,
   tasks,
   user,
 }: {
-  reminders: Reminder[];
   onOpenProfile: () => void;
   tasks: Task[];
   user: UserContext;
@@ -5195,7 +6122,8 @@ function CalendarScreen({
   const [visibleMonth, setVisibleMonth] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [selectedDate, setSelectedDate] = useState(today);
   const monthDays = useMemo(() => buildMonthGrid(visibleMonth), [visibleMonth]);
-  const activeItemsToday = getScheduleItemsForDate(tasks, reminders, today).filter((item) => !item.done).length;
+  const activeItemsToday = getScheduleItemsForDate(tasks, today).filter((item) => !item.done).length;
+  const selectedItems = getScheduleItemsForDate(tasks, selectedDate);
   const focusScore = calculateFocusScore(tasks, visibleMonth);
   const streak = calculateStreak(tasks);
 
@@ -5207,7 +6135,7 @@ function CalendarScreen({
         <View style={styles.calendarHeader}>
           <View>
             <Text style={styles.calendarTitle}>{formatMonthYear(visibleMonth)}</Text>
-            <Text style={styles.calendarSubtitle}>{activeItemsToday} active schedules today</Text>
+            <Text style={styles.calendarSubtitle}>{activeItemsToday} agendamento(s) ativo(s) hoje</Text>
           </View>
           <View style={styles.calendarNav}>
             <Pressable
@@ -5228,8 +6156,8 @@ function CalendarScreen({
         </View>
 
         <View style={styles.weekdayRow}>
-          {['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'].map((day) => (
-            <Text key={day} style={[styles.weekdayText, (day === 'SAT' || day === 'SUN') && styles.weekendText]}>
+          {['SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SAB', 'DOM'].map((day) => (
+            <Text key={day} style={[styles.weekdayText, (day === 'SAB' || day === 'DOM') && styles.weekendText]}>
               {day}
             </Text>
           ))}
@@ -5237,7 +6165,7 @@ function CalendarScreen({
 
         <View style={styles.calendarGrid}>
           {monthDays.map((day) => {
-            const hasEvents = getScheduleItemsForDate(tasks, reminders, day.date).length > 0;
+            const hasEvents = getScheduleItemsForDate(tasks, day.date).length > 0;
             const selected = isSameLocalDate(day.date, selectedDate);
             return (
               <Pressable
@@ -5273,7 +6201,7 @@ function CalendarScreen({
             <Text style={styles.metricIconText}>[]</Text>
           </View>
           <View>
-            <Text style={styles.metricTitle}>Focus{'\n'}Score</Text>
+            <Text style={styles.metricTitle}>Tarefas do mes</Text>
             <Text style={styles.metricValue}>{focusScore}%</Text>
           </View>
         </View>
@@ -5282,10 +6210,30 @@ function CalendarScreen({
             <Text style={styles.metricIconText}>@</Text>
           </View>
           <View>
-            <Text style={styles.metricTitle}>Streak</Text>
-            <Text style={styles.metricValue}>{streak} Days</Text>
+            <Text style={styles.metricTitle}>Sequencia</Text>
+            <Text style={styles.metricValue}>{streak} dias</Text>
           </View>
         </View>
+      </View>
+
+      <View style={styles.dashboardCard}>
+        <SectionTitle muted={formatScheduleDate(selectedDate)}>Agenda do dia</SectionTitle>
+        {selectedItems.length ? (
+          selectedItems.map((item) => (
+            <View key={`${item.type}-${item.id}`} style={styles.scheduleItem}>
+              <View style={styles.scheduleTypeDot} />
+              <View style={styles.flex}>
+                <Text style={styles.itemTitle}>{item.title}</Text>
+                <Text style={styles.mutedText}>{item.description}</Text>
+              </View>
+              <Pill tone={item.done ? 'green' : item.featured ? 'amber' : 'neutral'}>
+                {item.done ? 'OK' : 'Tarefa'}
+              </Pill>
+            </View>
+          ))
+        ) : (
+          <Text style={styles.mutedText}>Nenhuma tarefa pontual para esta data.</Text>
+        )}
       </View>
 
     </View>
@@ -5494,6 +6442,251 @@ function buildTaskDueAt(date: Date | null, hasTime: boolean) {
   return dueAt.toISOString();
 }
 
+function getLocalDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getWeekday(date: Date): HabitWeekday {
+  return date.getDay() as HabitWeekday;
+}
+
+function getWeekRange(date: Date) {
+  const day = date.getDay();
+  const daysSinceMonday = day === 0 ? 6 : day - 1;
+  const weekStart = new Date(date);
+  weekStart.setDate(date.getDate() - daysSinceMonday);
+  weekStart.setHours(0, 0, 0, 0);
+
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+
+  return { weekEnd, weekStart };
+}
+
+function getHabitWeeklyCheckInCount(habit: Habit, habitCheckIns: HabitCheckIn[], date: Date) {
+  const { weekEnd, weekStart } = getWeekRange(date);
+  return habitCheckIns.filter((checkIn) => {
+    if (checkIn.habit_id !== habit.id) {
+      return false;
+    }
+    const checkDate = new Date(`${checkIn.check_date}T12:00:00`);
+    return checkDate >= weekStart && checkDate <= weekEnd;
+  }).length;
+}
+
+function isHabitScheduledForDate(habit: Habit, habitCheckIns: HabitCheckIn[], date: Date) {
+  if (!habit.is_active) {
+    return false;
+  }
+
+  if (habit.frequency === 'daily') {
+    return true;
+  }
+
+  if (habit.frequency === 'weekdays') {
+    return habit.weekdays.includes(getWeekday(date));
+  }
+
+  const weeklyGoal = habit.weekly_goal ?? 1;
+  return getHabitWeeklyCheckInCount(habit, habitCheckIns, date) < weeklyGoal;
+}
+
+function getHabitsForDate(habits: Habit[], habitCheckIns: HabitCheckIn[], date: Date) {
+  return habits
+    .filter((habit) => isHabitScheduledForDate(habit, habitCheckIns, date))
+    .sort((a, b) => (a.reminder_time ?? '99:99').localeCompare(b.reminder_time ?? '99:99') || a.title.localeCompare(b.title));
+}
+
+function calculateHabitConsistency(habits: Habit[], habitCheckIns: HabitCheckIn[], date: Date) {
+  const { weekEnd, weekStart } = getWeekRange(date);
+  const activeHabits = habits.filter((habit) => habit.is_active);
+  const expectedCount = activeHabits.reduce((total, habit) => {
+    if (habit.frequency === 'daily') {
+      return total + 7;
+    }
+    if (habit.frequency === 'weekly_goal') {
+      return total + (habit.weekly_goal ?? 1);
+    }
+
+    const scheduledDays = Array.from({ length: 7 }, (_, index) => {
+      const targetDate = new Date(weekStart);
+      targetDate.setDate(weekStart.getDate() + index);
+      return getWeekday(targetDate);
+    }).filter((weekday) => habit.weekdays.includes(weekday)).length;
+    return total + scheduledDays;
+  }, 0);
+
+  if (!expectedCount) {
+    return 0;
+  }
+
+  const doneCount = activeHabits.reduce((total, habit) => {
+    const habitDoneCount = habitCheckIns.filter((checkIn) => {
+      if (checkIn.habit_id !== habit.id) {
+        return false;
+      }
+      const checkDate = new Date(`${checkIn.check_date}T12:00:00`);
+      return checkDate >= weekStart && checkDate <= weekEnd;
+    }).length;
+    return total + Math.min(habitDoneCount, habit.frequency === 'weekly_goal' ? habit.weekly_goal ?? 1 : 7);
+  }, 0);
+
+  return Math.min(100, Math.round((doneCount / expectedCount) * 100));
+}
+
+function getHabitDailyStats(habits: Habit[], habitCheckIns: HabitCheckIn[], dayCount: number) {
+  const today = new Date();
+  return Array.from({ length: dayCount }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(today.getDate() - (dayCount - 1 - index));
+    const dateKey = getLocalDateKey(date);
+    const expectedHabits = getHabitsForDate(habits, habitCheckIns, date);
+    const expectedHabitIds = new Set(expectedHabits.map((habit) => habit.id));
+    const done = habitCheckIns.filter(
+      (checkIn) => checkIn.check_date === dateKey && expectedHabitIds.has(checkIn.habit_id),
+    ).length;
+    const expected = expectedHabits.length;
+
+    return {
+      date,
+      dateKey,
+      done,
+      expected,
+      label: new Intl.DateTimeFormat('pt-BR', { weekday: 'short' }).format(date).slice(0, 3),
+      percent: expected ? Math.min(100, Math.round((done / expected) * 100)) : 0,
+    };
+  });
+}
+
+function getMonthHabitCells(habits: Habit[], habitCheckIns: HabitCheckIn[], visibleDate: Date) {
+  const monthStart = new Date(visibleDate.getFullYear(), visibleDate.getMonth(), 1);
+  const monthEnd = new Date(visibleDate.getFullYear(), visibleDate.getMonth() + 1, 0);
+
+  return Array.from({ length: monthEnd.getDate() }, (_, index) => {
+    const date = new Date(monthStart);
+    date.setDate(index + 1);
+    return getHabitDailyStatsForDate(habits, habitCheckIns, date);
+  });
+}
+
+function getHabitDailyStatsForDate(habits: Habit[], habitCheckIns: HabitCheckIn[], date: Date) {
+  const dateKey = getLocalDateKey(date);
+  const expectedHabits = getHabitsForDate(habits, habitCheckIns, date);
+  const expectedHabitIds = new Set(expectedHabits.map((habit) => habit.id));
+  const done = habitCheckIns.filter(
+    (checkIn) => checkIn.check_date === dateKey && expectedHabitIds.has(checkIn.habit_id),
+  ).length;
+  const expected = expectedHabits.length;
+
+  return {
+    dateKey,
+    done,
+    expected,
+    percent: expected ? Math.min(100, Math.round((done / expected) * 100)) : 0,
+  };
+}
+
+function calculateHabitCompletionRate(habit: Habit, habitCheckIns: HabitCheckIn[], dayCount: number) {
+  const today = new Date();
+  let expected = 0;
+  let done = 0;
+
+  for (let index = 0; index < dayCount; index += 1) {
+    const date = new Date(today);
+    date.setDate(today.getDate() - index);
+    if (!isHabitScheduledForDate(habit, habitCheckIns, date)) {
+      continue;
+    }
+
+    expected += 1;
+    const dateKey = getLocalDateKey(date);
+    if (habitCheckIns.some((checkIn) => checkIn.habit_id === habit.id && checkIn.check_date === dateKey)) {
+      done += 1;
+    }
+  }
+
+  return expected ? Math.min(100, Math.round((done / expected) * 100)) : 0;
+}
+
+function calculateHabitStreak(habits: Habit[], habitCheckIns: HabitCheckIn[]) {
+  let streak = 0;
+  const cursor = new Date();
+
+  while (streak < 365) {
+    const expectedHabits = getHabitsForDate(habits, habitCheckIns, cursor);
+    if (!expectedHabits.length) {
+      cursor.setDate(cursor.getDate() - 1);
+      continue;
+    }
+
+    const dateKey = getLocalDateKey(cursor);
+    const doneHabitIds = new Set(
+      habitCheckIns.filter((checkIn) => checkIn.check_date === dateKey).map((checkIn) => checkIn.habit_id),
+    );
+    if (!expectedHabits.every((habit) => doneHabitIds.has(habit.id))) {
+      break;
+    }
+
+    streak += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+
+  return streak;
+}
+
+function normalizeHabitTitle(title: string) {
+  return title.trim().replace(/\s+/g, ' ');
+}
+
+function normalizeHabitWeekdays(weekdays: HabitWeekday[]) {
+  return Array.from(
+    new Set(
+      weekdays.filter((weekday): weekday is HabitWeekday =>
+        Number.isInteger(weekday) && weekday >= 0 && weekday <= 6,
+      ),
+    ),
+  ).sort((a, b) => a - b);
+}
+
+function normalizeReminderTime(value: string) {
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const hour = Number.parseInt(match[1], 10);
+  const minute = Number.parseInt(match[2], 10);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function normalizeWeeklyGoal(value: string) {
+  const goal = Number.parseInt(value.trim(), 10);
+  return Number.isInteger(goal) && goal >= 1 && goal <= 7 ? goal : null;
+}
+
+function getHabitFrequencyLabel(habit: Habit) {
+  if (habit.frequency === 'daily') {
+    return habit.reminder_time ? `Diario as ${habit.reminder_time.slice(0, 5)}` : 'Diario';
+  }
+  if (habit.frequency === 'weekly_goal') {
+    return `${habit.weekly_goal ?? 1}x por semana`;
+  }
+
+  const labels = habit.weekdays
+    .map((weekday) => habitWeekdayOptions.find((option) => option.value === weekday)?.shortLabel)
+    .filter(Boolean)
+    .join(', ');
+  return labels || 'Dias especificos';
+}
+
 function hasExplicitTaskDueTime(date: Date) {
   return !(date.getHours() === 23 && date.getMinutes() === 59 && date.getSeconds() === 0 && date.getMilliseconds() === 0);
 }
@@ -5687,36 +6880,25 @@ function buildMonthGrid(monthDate: Date) {
 }
 
 type ScheduleItem =
-  | {
-      at: string;
-      description: string;
-      done: boolean;
-      endsAt: string | null;
-      featured: boolean;
-      id: string;
-      priority: Priority;
-      task: Task;
-      title: string;
-      type: 'task';
-    }
-  | {
-      at: string;
-      description: string;
-      done: boolean;
-      endsAt: null;
-      featured: boolean;
-      id: string;
-      priority: Priority;
-      title: string;
-      type: 'reminder';
-    };
+  {
+    at: string;
+    description: string;
+    done: boolean;
+    endsAt: string | null;
+    featured: boolean;
+    id: string;
+    priority: Priority;
+    task: Task;
+    title: string;
+    type: 'task';
+  };
 
-function getScheduleItemsForDate(tasks: Task[], reminders: Reminder[], date: Date): ScheduleItem[] {
+function getScheduleItemsForDate(tasks: Task[], date: Date): ScheduleItem[] {
   const taskItems: ScheduleItem[] = tasks
     .filter((task) => task.due_at && isSameLocalDate(new Date(task.due_at), date))
     .map((task) => ({
       at: task.due_at ?? new Date(date).toISOString(),
-      description: task.description || (task.status === 'done' ? 'Concluida' : 'Review backlog and set focus areas.'),
+      description: task.description || (task.status === 'done' ? 'Concluida' : 'Tarefa pontual com prazo definido.'),
       done: task.status === 'done',
       endsAt: task.due_at ? addMinutes(task.due_at, 90) : null,
       featured: task.priority === 'urgent' || task.priority === 'high',
@@ -5727,21 +6909,7 @@ function getScheduleItemsForDate(tasks: Task[], reminders: Reminder[], date: Dat
       type: 'task',
     }));
 
-  const reminderItems: ScheduleItem[] = reminders
-    .filter((reminder) => isSameLocalDate(new Date(reminder.remind_at), date))
-    .map((reminder) => ({
-      at: reminder.remind_at,
-      description: reminder.is_done ? 'Lembrete concluido' : 'Alerta local agendado',
-      done: reminder.is_done,
-      endsAt: null,
-      featured: false,
-      id: reminder.id,
-      priority: 'medium',
-      title: reminder.title,
-      type: 'reminder',
-    }));
-
-  return [...taskItems, ...reminderItems].sort((a, b) => dateValue(a.at) - dateValue(b.at));
+  return taskItems.sort((a, b) => dateValue(a.at) - dateValue(b.at));
 }
 
 function addMinutes(value: string, minutes: number) {
@@ -5791,14 +6959,14 @@ function calculateStreak(tasks: Task[]) {
 }
 
 function formatMonthYear(date: Date) {
-  return new Intl.DateTimeFormat('en-US', {
+  return new Intl.DateTimeFormat('pt-BR', {
     month: 'long',
     year: 'numeric',
   }).format(date);
 }
 
 function formatScheduleDate(date: Date) {
-  return new Intl.DateTimeFormat('en-US', {
+  return new Intl.DateTimeFormat('pt-BR', {
     day: '2-digit',
     month: 'short',
     year: 'numeric',
@@ -6419,6 +7587,32 @@ function makeStyles(colors: AppColors) {
   profileNameModalContent: {
     gap: spacing.xl,
   },
+  profileStatsGrid: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  profileStatCard: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    flex: 1,
+    gap: spacing.xs,
+    minHeight: 76,
+    padding: spacing.md,
+  },
+  profileStatValue: {
+    color: colors.text,
+    fontFamily: fontFamily.black,
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  profileStatLabel: {
+    color: colors.muted,
+    fontFamily: fontFamily.bold,
+    fontSize: 11,
+    fontWeight: '700',
+  },
   folderModalActions: {
     marginTop: spacing.sm,
   },
@@ -6559,6 +7753,288 @@ function makeStyles(colors: AppColors) {
     fontSize: 12,
     fontWeight: '700',
     opacity: 0.82,
+  },
+  smallIconButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36,
+  },
+  habitsScreen: {
+    gap: spacing.xl,
+  },
+  habitsHero: {
+    gap: spacing.md,
+    paddingTop: spacing.xl,
+  },
+  habitMetricGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  habitMetricCard: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    flexGrow: 1,
+    flexBasis: '22%',
+    gap: spacing.xs,
+    minHeight: 76,
+    minWidth: 72,
+    padding: spacing.md,
+  },
+  habitCard: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 62,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  habitCheckButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 13,
+    borderWidth: 2,
+    height: 26,
+    justifyContent: 'center',
+    width: 26,
+  },
+  habitCheckButtonDone: {
+    backgroundColor: colors.success,
+    borderColor: colors.success,
+  },
+  habitTitle: {
+    color: colors.text,
+    fontFamily: fontFamily.extraBold,
+    fontSize: typography.body,
+    fontWeight: '800',
+  },
+  habitTitleDone: {
+    color: colors.muted,
+    textDecorationLine: 'line-through',
+  },
+  habitMeta: {
+    color: colors.muted,
+    fontFamily: fontFamily.regular,
+    fontSize: typography.small,
+    marginTop: 2,
+  },
+  habitColorDot: {
+    borderRadius: 7,
+    height: 14,
+    width: 14,
+  },
+  weekdayPicker: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+  },
+  weekdayButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 38,
+    justifyContent: 'center',
+    width: 38,
+  },
+  weekdayButtonActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  weekdayButtonText: {
+    color: colors.muted,
+    fontFamily: fontFamily.black,
+    fontSize: typography.small,
+    fontWeight: '900',
+  },
+  weekdayButtonTextActive: {
+    color: colors.surface,
+  },
+  habitColorGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  habitColorButton: {
+    borderRadius: 18,
+    borderWidth: 3,
+    height: 36,
+    width: 36,
+  },
+  habitActionsButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 17,
+    borderWidth: 1,
+    height: 34,
+    justifyContent: 'center',
+    width: 34,
+  },
+  inactiveToggleButton: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    minHeight: 34,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.sm,
+  },
+  inactiveToggleText: {
+    color: colors.primary,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
+  },
+  inactiveHabitCard: {
+    opacity: 0.72,
+  },
+  deleteHabitButton: {
+    alignItems: 'center',
+    backgroundColor: colors.dangerSoft,
+    borderColor: colors.danger,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    minHeight: 34,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.sm,
+  },
+  deleteHabitText: {
+    color: colors.danger,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
+  },
+  weekChartRow: {
+    alignItems: 'flex-end',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minHeight: 136,
+  },
+  weekChartDay: {
+    alignItems: 'center',
+    flex: 1,
+    gap: spacing.xs,
+  },
+  weekBarTrack: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 7,
+    height: 96,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+    position: 'relative',
+    width: '100%',
+  },
+  weekBarExpected: {
+    backgroundColor: colors.primarySoft,
+    bottom: 0,
+    position: 'absolute',
+    width: '100%',
+  },
+  weekBarDone: {
+    backgroundColor: colors.primary,
+    bottom: 0,
+    position: 'absolute',
+    width: '100%',
+  },
+  weekChartLabel: {
+    color: colors.muted,
+    fontFamily: fontFamily.bold,
+    fontSize: 10,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  lineChart: {
+    alignItems: 'flex-end',
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius.md,
+    flexDirection: 'row',
+    gap: 2,
+    height: 92,
+    padding: spacing.sm,
+  },
+  lineChartPointWrap: {
+    alignItems: 'center',
+    flex: 1,
+    height: '100%',
+    justifyContent: 'flex-end',
+  },
+  lineChartPoint: {
+    backgroundColor: colors.success,
+    borderRadius: 3,
+    minHeight: 4,
+    width: '80%',
+  },
+  heatmapGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  heatmapCell: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 4,
+    borderWidth: 1,
+    height: 20,
+    width: 20,
+  },
+  heatmapCellSoft: {
+    backgroundColor: colors.primarySoft,
+  },
+  heatmapCellMedium: {
+    backgroundColor: colors.warningSoft,
+    borderColor: colors.warning,
+  },
+  heatmapCellStrong: {
+    backgroundColor: colors.success,
+    borderColor: colors.success,
+  },
+  habitSummaryList: {
+    gap: spacing.sm,
+  },
+  habitSummaryRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minHeight: 38,
+  },
+  habitSummaryTitle: {
+    color: colors.text,
+    flex: 1,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
+  },
+  habitSummaryTrack: {
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: 5,
+    height: 10,
+    overflow: 'hidden',
+    width: 72,
+  },
+  habitSummaryFill: {
+    backgroundColor: colors.primary,
+    height: '100%',
+  },
+  habitSummaryRate: {
+    color: colors.muted,
+    fontFamily: fontFamily.black,
+    fontSize: 11,
+    fontWeight: '900',
+    minWidth: 34,
+    textAlign: 'right',
   },
   taskFilterPanel: {
     gap: spacing.sm,
@@ -7556,7 +9032,7 @@ function makeStyles(colors: AppColors) {
   navLabel: {
     color: colors.muted,
     fontFamily: fontFamily.bold,
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
     textAlign: 'center',
   },
@@ -8106,6 +9582,24 @@ function makeStyles(colors: AppColors) {
     fontFamily: fontFamily.black,
     fontSize: 22,
     fontWeight: '900',
+  },
+  scheduleItem: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 58,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  scheduleTypeDot: {
+    backgroundColor: colors.primary,
+    borderRadius: 5,
+    height: 10,
+    width: 10,
   },
   scheduleHeader: {
     alignItems: 'center',

@@ -2,6 +2,8 @@ export type Priority = 'low' | 'medium' | 'high' | 'urgent';
 export type TaskStatus = 'todo' | 'doing' | 'done';
 export type TaskNotificationMode = 'once' | 'repeat';
 export type WorkspaceRole = 'owner' | 'member';
+export type HabitFrequency = 'daily' | 'weekdays' | 'weekly_goal';
+export type HabitWeekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export type TaskCategory = {
   id: string;
@@ -44,6 +46,37 @@ export type TaskDeadlineNotificationRule = {
   enabled: boolean;
   created_at?: string;
   updated_at: string;
+};
+
+export type HabitReminderRule = {
+  enabled: boolean;
+  time: string | null;
+  notification_ids: string[];
+};
+
+export type Habit = {
+  id: string;
+  owner_id: string;
+  title: string;
+  description: string | null;
+  frequency: HabitFrequency;
+  weekdays: HabitWeekday[];
+  weekly_goal: number | null;
+  reminder_time: string | null;
+  reminder_notification_ids: string[];
+  color: string;
+  icon: string;
+  is_active: boolean;
+  created_at?: string;
+  updated_at: string;
+};
+
+export type HabitCheckIn = {
+  id: string;
+  habit_id: string;
+  owner_id: string;
+  check_date: string;
+  created_at: string;
 };
 
 export type Workspace = {

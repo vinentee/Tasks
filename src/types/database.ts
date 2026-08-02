@@ -1,5 +1,7 @@
 import type {
   ChecklistItem,
+  Habit,
+  HabitCheckIn,
   Reminder,
   SharedList,
   SharedListItem,
@@ -68,6 +70,11 @@ export type Database = {
         ChecklistItem,
         Partial<ChecklistItem> & Pick<ChecklistItem, 'task_id' | 'title'>
       >;
+      habits: Table<Habit, Partial<Habit> & Pick<Habit, 'owner_id' | 'title'>>;
+      habit_check_ins: Table<
+        HabitCheckIn,
+        Partial<HabitCheckIn> & Pick<HabitCheckIn, 'habit_id' | 'owner_id' | 'check_date'>
+      >;
       shared_notes: Table<SharedNote, Partial<SharedNote> & Pick<SharedNote, 'workspace_id' | 'title'>>;
       shared_lists: Table<SharedList, Partial<SharedList> & Pick<SharedList, 'workspace_id' | 'title'>>;
       shared_list_items: Table<
@@ -127,6 +134,7 @@ export type Database = {
     Enums: {
       task_priority: 'low' | 'medium' | 'high' | 'urgent';
       task_status: 'todo' | 'doing' | 'done';
+      habit_frequency: 'daily' | 'weekdays' | 'weekly_goal';
       workspace_role: 'owner' | 'member';
       invitation_status: 'pending' | 'accepted' | 'revoked';
     };

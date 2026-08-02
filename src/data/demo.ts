@@ -1,5 +1,7 @@
 import type {
   ChecklistItem,
+  Habit,
+  HabitCheckIn,
   Reminder,
   SharedList,
   SharedListItem,
@@ -112,6 +114,64 @@ export const demoChecklistItems: ChecklistItem[] = [
   { id: 'check-1', task_id: 'task-1', title: 'Listar pendencias', is_done: true, position: 1 },
   { id: 'check-2', task_id: 'task-1', title: 'Marcar horarios fixos', is_done: false, position: 2 },
   { id: 'check-3', task_id: 'task-2', title: 'Conferir itens de limpeza', is_done: false, position: 1 },
+];
+
+export const demoHabits: Habit[] = [
+  {
+    id: 'habit-water',
+    owner_id: demoUserId,
+    title: 'Beber agua',
+    description: 'Manter uma garrafa por perto e registrar ao longo do dia.',
+    frequency: 'daily',
+    weekdays: [],
+    weekly_goal: null,
+    reminder_time: '09:00',
+    reminder_notification_ids: [],
+    color: '#0f8f62',
+    icon: 'droplet',
+    is_active: true,
+    updated_at: now,
+  },
+  {
+    id: 'habit-reading',
+    owner_id: demoUserId,
+    title: 'Ler 20 minutos',
+    description: 'Leitura leve para fechar o dia.',
+    frequency: 'weekdays',
+    weekdays: [1, 2, 3, 4, 5],
+    weekly_goal: null,
+    reminder_time: '21:00',
+    reminder_notification_ids: [],
+    color: '#7c3aed',
+    icon: 'book',
+    is_active: true,
+    updated_at: now,
+  },
+  {
+    id: 'habit-workout',
+    owner_id: demoUserId,
+    title: 'Treino ou caminhada',
+    description: 'Meta flexivel para manter movimento na semana.',
+    frequency: 'weekly_goal',
+    weekdays: [],
+    weekly_goal: 3,
+    reminder_time: null,
+    reminder_notification_ids: [],
+    color: '#f59e0b',
+    icon: 'activity',
+    is_active: true,
+    updated_at: now,
+  },
+];
+
+export const demoHabitCheckIns: HabitCheckIn[] = [
+  {
+    id: 'habit-check-water-today',
+    habit_id: 'habit-water',
+    owner_id: demoUserId,
+    check_date: new Date().toLocaleDateString('sv-SE'),
+    created_at: now,
+  },
 ];
 
 export const demoWorkspaces: Workspace[] = [

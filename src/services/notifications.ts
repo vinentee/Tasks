@@ -46,6 +46,56 @@ export async function scheduleLocalReminder(title: string, remindAtIso: string) 
   });
 }
 
+export async function scheduleHabitReminder(habitId: string, title: string, reminderTime: string | null) {
+  if (!reminderTime) {
+    return [];
+  }
+
+  const [hourText, minuteText] = reminderTime.split(':');
+  const hour = Number.parseInt(hourText ?? '', 10);
+  const minute = Number.parseInt(minuteText ?? '', 10);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return [];
+  }
+
+  const granted = await ensureNotificationPermission();
+  if (!granted) {
+    return [];
+  }
+
+  const notificationIds: string[] = [];
+  const today = new Date();
+  today.setSeconds(0, 0);
+
+  for (let offset = 0; offset < 14; offset += 1) {
+    const date = new Date(today);
+    date.setDate(today.getDate() + offset);
+    date.setHours(hour, minute, 0, 0);
+    if (date.getTime() <= Date.now()) {
+      continue;
+    }
+
+    const notificationId = await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Rotina de hoje',
+        body: title,
+        data: { habitId, kind: 'habit' },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date,
+      },
+    });
+    notificationIds.push(notificationId);
+  }
+
+  return notificationIds;
+}
+
+export async function cancelHabitReminders(notificationIds: string[] | null | undefined) {
+  await cancelLocalReminders(notificationIds);
+}
+
 export async function cancelLocalReminder(notificationId: string | null) {
   if (!notificationId) {
     return;
