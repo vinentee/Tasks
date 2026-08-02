@@ -14,6 +14,8 @@ import {
   CalendarDays,
   Bell,
   Check,
+  ChevronDown,
+  ChevronUp,
   EllipsisVertical,
   FolderKanban,
   Home as HomeIcon,
@@ -36,13 +38,13 @@ import {
   Modal,
   Platform,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   Switch,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Field, Pill, SectionTitle, useTextStyles } from './components/ui';
 import {
@@ -389,9 +391,11 @@ function useAppStyles() {
 
 export function RootApp() {
   return (
-    <ThemeProvider>
-      <RootAppContent />
-    </ThemeProvider>
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <RootAppContent />
+      </ThemeProvider>
+    </SafeAreaProvider>
   );
 }
 
@@ -427,7 +431,7 @@ function RootAppContent() {
 
   if (!isThemeReady || booting || (!fontsLoaded && !fontError)) {
     return (
-      <SafeAreaView style={styles.centered}>
+      <SafeAreaView edges={['bottom', 'left', 'right', 'top']} style={styles.centered}>
         <ActivityIndicator color={colors.primary} />
         <Text style={textStyles.muted}>Carregando sessao...</Text>
       </SafeAreaView>
@@ -489,7 +493,7 @@ function AuthScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView edges={['bottom', 'left', 'right', 'top']} style={styles.safe}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
         <ScrollView contentContainerStyle={styles.authContent}>
           <Text style={textStyles.title}>Tasks</Text>
@@ -531,6 +535,7 @@ function AuthScreen() {
 function MainApp({ user }: { user: UserContext }) {
   const { colors, styles } = useAppStyles();
   const { setThemeKey, themeKey } = useTheme();
+  const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState<TabKey>('home');
   const [lastMainTab, setLastMainTab] = useState<MainTabKey>('home');
   const [isTaskModalVisible, setIsTaskModalVisible] = useState(false);
@@ -1081,6 +1086,47 @@ function MainApp({ user }: { user: UserContext }) {
       setTaskCategories((current) => [...current, data].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)));
     }
 
+    return true;
+  };
+
+  const deleteTaskCategory = async (category: TaskCategory) => {
+    const categoryTaskIds = tasks
+      .filter((task) => task.category_id === category.id)
+      .map((task) => task.id);
+    const categoryRules = taskNotificationRules.filter((rule) => categoryTaskIds.includes(rule.task_id));
+
+    const removeCategoryLocally = () => {
+      setTaskCategories((current) => current.filter((item) => item.id !== category.id));
+      setTasks((current) => current.filter((task) => task.category_id !== category.id));
+      setChecklistItems((current) => current.filter((item) => !categoryTaskIds.includes(item.task_id)));
+      setTaskNotificationRules((current) => current.filter((rule) => !categoryTaskIds.includes(rule.task_id)));
+    };
+
+    if (!supabase) {
+      await cancelLocalReminders(categoryRules.flatMap((rule) => rule.notification_ids));
+      removeCategoryLocally();
+      return true;
+    }
+
+    if (categoryTaskIds.length) {
+      const { error: taskDeleteError } = await supabase.from('tasks').delete().eq('category_id', category.id);
+      if (taskDeleteError) {
+        Alert.alert('Erro ao excluir categoria', taskDeleteError.message);
+        return false;
+      }
+    }
+
+    const { error: categoryDeleteError } = await supabase.from('task_categories').delete().eq('id', category.id);
+    if (categoryDeleteError) {
+      Alert.alert('Erro ao excluir categoria', categoryDeleteError.message);
+      setTasks((current) => current.filter((task) => task.category_id !== category.id));
+      setChecklistItems((current) => current.filter((item) => !categoryTaskIds.includes(item.task_id)));
+      setTaskNotificationRules((current) => current.filter((rule) => !categoryTaskIds.includes(rule.task_id)));
+      return false;
+    }
+
+    await cancelLocalReminders(categoryRules.flatMap((rule) => rule.notification_ids));
+    removeCategoryLocally();
     return true;
   };
 
@@ -2392,8 +2438,8 @@ function MainApp({ user }: { user: UserContext }) {
   };
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.content}>
+    <SafeAreaView edges={['left', 'right', 'top']} style={styles.safe}>
+      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 132 + insets.bottom }]}>
         {loading ? <ActivityIndicator color={colors.primary} style={styles.loadingDot} /> : null}
 
         {activeTab === 'home' ? (
@@ -2414,6 +2460,7 @@ function MainApp({ user }: { user: UserContext }) {
             categories={taskCategories}
             createCategory={createTaskCategory}
             createTask={createTask}
+            deleteCategory={deleteTaskCategory}
             deleteTask={deleteTask}
             isCreateModalVisible={isTaskModalVisible}
             onCloseCreateModal={() => setIsTaskModalVisible(false)}
@@ -2497,7 +2544,7 @@ function MainApp({ user }: { user: UserContext }) {
             }
             setIsTaskModalVisible(true);
           }}
-          style={({ pressed }) => [styles.fab, pressed && styles.pressed]}
+          style={({ pressed }) => [styles.fab, { bottom: 98 + insets.bottom }, pressed && styles.pressed]}
         >
           <Plus color={colors.surface} size={28} strokeWidth={3} />
         </Pressable>
@@ -2526,7 +2573,7 @@ function MainApp({ user }: { user: UserContext }) {
         updateTask={updateTask}
       />
 
-      <TabBar activeTab={activeTab} onChange={changeMainTab} />
+      <TabBar activeTab={activeTab} bottomInset={insets.bottom} onChange={changeMainTab} />
     </SafeAreaView>
   );
 }
@@ -2673,7 +2720,15 @@ function AppHeader({ onOpenProfile, user }: { onOpenProfile: () => void; user: U
   );
 }
 
-function TabBar({ activeTab, onChange }: { activeTab: TabKey; onChange: (tab: MainTabKey) => void }) {
+function TabBar({
+  activeTab,
+  bottomInset,
+  onChange,
+}: {
+  activeTab: TabKey;
+  bottomInset: number;
+  onChange: (tab: MainTabKey) => void;
+}) {
   const { colors, styles } = useAppStyles();
   const tabs: Array<{ key: MainTabKey; label: string; Icon: LucideIcon }> = [
     { key: 'home', label: 'Home', Icon: HomeIcon },
@@ -2683,7 +2738,7 @@ function TabBar({ activeTab, onChange }: { activeTab: TabKey; onChange: (tab: Ma
   ];
 
   return (
-    <View style={styles.bottomNav}>
+    <View style={[styles.bottomNav, { minHeight: 78 + bottomInset, paddingBottom: spacing.sm + bottomInset }]}>
       {tabs.map((tab) => {
         const isActive = activeTab === tab.key;
         const iconColor = isActive ? colors.surface : colors.muted;
@@ -2709,6 +2764,7 @@ function TasksScreen({
   categories,
   createCategory,
   createTask,
+  deleteCategory,
   deleteTask,
   isCreateModalVisible,
   onCloseCreateModal,
@@ -2723,6 +2779,7 @@ function TasksScreen({
   categories: TaskCategory[];
   createCategory: (name: string) => Promise<boolean>;
   createTask: (input: TaskCreateInput) => Promise<boolean>;
+  deleteCategory: (category: TaskCategory) => Promise<boolean>;
   deleteTask: (task: Task) => Promise<void>;
   isCreateModalVisible: boolean;
   onCloseCreateModal: () => void;
@@ -2736,11 +2793,36 @@ function TasksScreen({
 }) {
   const { colors, styles } = useAppStyles();
   const [selectedCategoryFilters, setSelectedCategoryFilters] = useState<TaskCategoryFilterKey[]>([]);
+  const [isCategoryFilterOpen, setIsCategoryFilterOpen] = useState(false);
   const [isCategoryModalVisible, setIsCategoryModalVisible] = useState(false);
+  const [openCategoryActionId, setOpenCategoryActionId] = useState<string | null>(null);
   const sortedCategories = useMemo(
     () => [...categories].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)),
     [categories],
   );
+
+  useEffect(() => {
+    const availableFilters = new Set<TaskCategoryFilterKey>(['uncategorized', ...categories.map((category) => category.id)]);
+    setSelectedCategoryFilters((current) => current.filter((filter) => availableFilters.has(filter)));
+    setOpenCategoryActionId((current) => (current && availableFilters.has(current) ? current : null));
+  }, [categories]);
+
+  const getCategoryFilterLabel = () => {
+    if (!selectedCategoryFilters.length) {
+      return 'Todas';
+    }
+
+    if (selectedCategoryFilters.length === 1) {
+      const selectedFilter = selectedCategoryFilters[0];
+      if (selectedFilter === 'uncategorized') {
+        return 'Sem categoria';
+      }
+
+      return sortedCategories.find((category) => category.id === selectedFilter)?.name ?? '1 categoria';
+    }
+
+    return `${selectedCategoryFilters.length} categorias`;
+  };
   const weekTasks = tasks.filter((task) => isCurrentLocalWeek(task.due_at));
   const doneTasksThisWeek = weekTasks.filter((task) => task.status === 'done').length;
   const productivity = weekTasks.length ? Math.round((doneTasksThisWeek / weekTasks.length) * 100) : 0;
@@ -2789,43 +2871,69 @@ function TasksScreen({
             <Text style={styles.categoryCreateText}>Nova</Text>
           </Pressable>
         </View>
-        <View style={styles.segmented}>
-          <Pressable
-            onPress={() => setSelectedCategoryFilters([])}
-            style={[styles.segment, isAllCategoriesSelected && styles.activeSegment]}
-          >
-            <Text style={[styles.segmentText, isAllCategoriesSelected && styles.activeSegmentText]}>
-              Todas
-            </Text>
-          </Pressable>
-          {sortedCategories.map((category) => (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: isCategoryFilterOpen }}
+          onPress={() => setIsCategoryFilterOpen((current) => !current)}
+          style={({ pressed }) => [styles.categorySelectField, pressed && styles.pressed]}
+        >
+          <View>
+            <Text style={styles.categorySelectLabel}>Filtrar por categoria</Text>
+            <Text style={styles.categorySelectValue}>{getCategoryFilterLabel()}</Text>
+          </View>
+          {isCategoryFilterOpen ? (
+            <ChevronUp color={colors.muted} size={18} strokeWidth={1.8} />
+          ) : (
+            <ChevronDown color={colors.muted} size={18} strokeWidth={1.8} />
+          )}
+        </Pressable>
+        {isCategoryFilterOpen ? (
+          <View style={styles.categorySelectDropdown}>
             <Pressable
-              key={category.id}
-              onPress={() => toggleCategoryFilter(category.id)}
-              style={[styles.segment, selectedCategoryFilters.includes(category.id) && styles.activeSegment]}
+              onPress={() => setSelectedCategoryFilters([])}
+              style={({ pressed }) => [styles.categorySelectOption, pressed && styles.pressed]}
             >
-              <Text style={[styles.segmentText, selectedCategoryFilters.includes(category.id) && styles.activeSegmentText]}>
-                {category.name}
+              <Text style={[styles.checkbox, isAllCategoriesSelected && styles.checkboxDone]} />
+              <Text style={[styles.categorySelectOptionText, isAllCategoriesSelected && styles.categorySelectOptionTextActive]}>
+                Todas
               </Text>
             </Pressable>
-          ))}
-          <Pressable
-            onPress={() => toggleCategoryFilter('uncategorized')}
-            style={[styles.segment, selectedCategoryFilters.includes('uncategorized') && styles.activeSegment]}
-          >
-            <Text style={[styles.segmentText, selectedCategoryFilters.includes('uncategorized') && styles.activeSegmentText]}>
-              Sem categoria
-            </Text>
-          </Pressable>
-        </View>
+            {sortedCategories.map((category) => (
+              <Pressable
+                key={category.id}
+                onPress={() => toggleCategoryFilter(category.id)}
+                style={({ pressed }) => [styles.categorySelectOption, pressed && styles.pressed]}
+              >
+                <Text style={[styles.checkbox, selectedCategoryFilters.includes(category.id) && styles.checkboxDone]} />
+                <Text style={[styles.categorySelectOptionText, selectedCategoryFilters.includes(category.id) && styles.categorySelectOptionTextActive]}>
+                  {category.name}
+                </Text>
+              </Pressable>
+            ))}
+            <Pressable
+              onPress={() => toggleCategoryFilter('uncategorized')}
+              style={({ pressed }) => [styles.categorySelectOption, pressed && styles.pressed]}
+            >
+              <Text style={[styles.checkbox, selectedCategoryFilters.includes('uncategorized') && styles.checkboxDone]} />
+              <Text style={[styles.categorySelectOptionText, selectedCategoryFilters.includes('uncategorized') && styles.categorySelectOptionTextActive]}>
+                Sem categoria
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
       </View>
 
       {visibleCategories.map((category) => (
         <TaskCategorySection
           category={category}
+          deleteCategory={deleteCategory}
           deleteTask={deleteTask}
+          isActionMenuOpen={openCategoryActionId === category.id}
           key={category.id}
           onEditTask={onEditTask}
+          onToggleActionMenu={() => {
+            setOpenCategoryActionId((current) => (current === category.id ? null : category.id));
+          }}
           onOpenTaskDetail={onOpenTaskDetail}
           tasks={visibleTasks.filter((task) => task.category_id === category.id)}
           toggleTaskDone={toggleTaskDone}
@@ -2835,8 +2943,11 @@ function TasksScreen({
       {uncategorizedTasks.length ? (
         <TaskCategorySection
           category={null}
+          deleteCategory={deleteCategory}
           deleteTask={deleteTask}
+          isActionMenuOpen={false}
           onEditTask={onEditTask}
+          onToggleActionMenu={() => undefined}
           onOpenTaskDetail={onOpenTaskDetail}
           tasks={uncategorizedTasks}
           toggleTaskDone={toggleTaskDone}
@@ -2876,6 +2987,7 @@ function TaskCategoryCreateModal({
   onClose: () => void;
 }) {
   const { styles } = useAppStyles();
+  const insets = useSafeAreaInsets();
   const [name, setName] = useState('');
 
   const closeModal = () => {
@@ -2893,7 +3005,7 @@ function TaskCategoryCreateModal({
   return (
     <Modal animationType="fade" onRequestClose={closeModal} transparent visible={isVisible}>
       <KeyboardAvoidingView behavior="height" style={styles.modalKeyboardAvoiding}>
-        <View style={styles.centeredModalOverlay}>
+        <View style={[styles.centeredModalOverlay, { paddingBottom: spacing.xl + insets.bottom, paddingTop: spacing.xl + insets.top }]}>
           <View style={styles.centeredModalSheet}>
             <View style={styles.rowBetween}>
               <Text style={styles.modalTitle}>Nova categoria</Text>
@@ -2917,31 +3029,65 @@ function TaskCategoryCreateModal({
 
 function TaskCategorySection({
   category,
+  deleteCategory,
   deleteTask,
+  isActionMenuOpen,
   onEditTask,
+  onToggleActionMenu,
   onOpenTaskDetail,
   tasks,
   toggleTaskDone,
 }: {
   category: TaskCategory | null;
+  deleteCategory: (category: TaskCategory) => Promise<boolean>;
   deleteTask: (task: Task) => Promise<void>;
+  isActionMenuOpen: boolean;
   onEditTask: (task: Task) => void;
+  onToggleActionMenu: () => void;
   onOpenTaskDetail: (task: Task) => void;
   tasks: Task[];
   toggleTaskDone: (task: Task) => Promise<void>;
 }) {
-  const { styles } = useAppStyles();
+  const { colors, styles } = useAppStyles();
   const sortedTasks = [...tasks].sort(sortTasksByPriorityAndTime);
 
   return (
-    <View style={styles.taskCategoryBlock}>
+    <View style={[styles.taskCategoryBlock, isActionMenuOpen && styles.taskCategoryBlockMenuOpen]}>
       <View style={styles.taskCategoryHeader}>
         <View style={styles.taskCategoryTitleWrap}>
-          <Text style={styles.taskCategoryIcon}>{category?.icon === 'user' ? 'P' : category?.icon === 'briefcase' ? 'W' : 'L'}</Text>
+          <View style={styles.taskCategoryDot} />
           <Text style={styles.taskCategoryTitle}>{category?.name ?? 'Sem categoria'}</Text>
         </View>
-        <View style={styles.taskCountBadge}>
-          <Text style={styles.taskCountText}>{tasks.length} tarefas</Text>
+        <View style={styles.taskCategoryHeaderActions}>
+          <View style={styles.taskCountBadge}>
+            <Text style={styles.taskCountText}>{tasks.length} tarefas</Text>
+          </View>
+          {category ? (
+            <View style={styles.categoryActionWrap}>
+              <Pressable
+                accessibilityLabel="Abrir acoes da categoria"
+                accessibilityRole="button"
+                onPress={onToggleActionMenu}
+                style={({ pressed }) => [styles.compactTaskMenuButton, pressed && styles.pressed]}
+              >
+                <EllipsisVertical color={colors.muted} size={20} strokeWidth={2.4} />
+              </Pressable>
+              {isActionMenuOpen ? (
+                <View style={[styles.taskActionMenu, styles.categoryActionMenu]}>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => {
+                      onToggleActionMenu();
+                      confirmDeleteTaskCategory(category, tasks.length, deleteCategory);
+                    }}
+                    style={({ pressed }) => [styles.taskActionMenuItem, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.taskActionMenuDangerText}>Excluir categoria</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       </View>
 
@@ -3061,6 +3207,7 @@ function TaskCreateModal({
   onClose: () => void;
 }) {
   const { colors, styles } = useAppStyles();
+  const insets = useSafeAreaInsets();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [selectedDueDate, setSelectedDueDate] = useState<Date | null>(null);
@@ -3237,7 +3384,7 @@ function TaskCreateModal({
         style={styles.modalKeyboardAvoiding}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalSheet}>
+          <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
             <ScrollView contentContainerStyle={styles.modalSheetContent} keyboardShouldPersistTaps="handled">
             <View style={styles.rowBetween}>
               <Text style={styles.modalTitle}>Nova tarefa</Text>
@@ -3442,6 +3589,7 @@ function TaskEditModal({
   updateTask: (input: TaskUpdateInput) => Promise<boolean>;
 }) {
   const { styles } = useAppStyles();
+  const insets = useSafeAreaInsets();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [selectedDueDate, setSelectedDueDate] = useState<Date | null>(null);
@@ -3631,7 +3779,7 @@ function TaskEditModal({
         style={styles.modalKeyboardAvoiding}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalSheet}>
+          <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
             <ScrollView contentContainerStyle={styles.modalSheetContent} keyboardShouldPersistTaps="handled">
               <View style={styles.rowBetween}>
                 <Text style={styles.modalTitle}>Editar tarefa</Text>
@@ -3922,7 +4070,7 @@ function TaskDetailModal({
         keyboardVerticalOffset={Platform.OS === 'ios' ? spacing.lg : 0}
         style={styles.taskDetailKeyboardAvoiding}
       >
-        <SafeAreaView style={styles.taskDetailSafe}>
+        <SafeAreaView edges={['bottom', 'left', 'right', 'top']} style={styles.taskDetailSafe}>
           <ScrollView contentContainerStyle={styles.taskDetailContent} keyboardShouldPersistTaps="handled">
             <View style={styles.rowBetween}>
               <Text style={styles.taskDetailEyebrow}>Detalhes da tarefa</Text>
@@ -4035,6 +4183,7 @@ function ProfileScreen({
   user: UserContext;
 }) {
   const { colors, styles, textStyles } = useAppStyles();
+  const insets = useSafeAreaInsets();
   const [name, setName] = useState(user.fullName ?? getFirstName(user));
   const [isNameModalVisible, setIsNameModalVisible] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -4165,7 +4314,7 @@ function ProfileScreen({
           style={styles.modalKeyboardAvoiding}
         >
           <View style={styles.modalOverlay}>
-            <View style={styles.modalSheet}>
+            <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
               <View style={styles.profileNameModalContent}>
                 <View style={styles.rowBetween}>
                   <Text style={styles.modalTitle}>Alterar nome</Text>
@@ -4257,6 +4406,7 @@ function CollaborationScreen({
   workspaces: Workspace[];
 }) {
   const { colors, styles, textStyles } = useAppStyles();
+  const insets = useSafeAreaInsets();
   const [inviteEmail, setInviteEmail] = useState('');
   const [isInviteModalVisible, setIsInviteModalVisible] = useState(false);
   const [isAssistantModalVisible, setIsAssistantModalVisible] = useState(false);
@@ -4776,7 +4926,7 @@ function CollaborationScreen({
       <Modal animationType="slide" onRequestClose={closeFolderModal} transparent visible={isFolderModalVisible}>
         <KeyboardAvoidingView behavior="height" keyboardVerticalOffset={0} style={styles.modalKeyboardAvoiding}>
           <View style={styles.modalOverlay}>
-            <View style={styles.modalSheet}>
+            <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
               <View style={styles.folderModalContent}>
                 <View style={styles.rowBetween}>
                   <Text style={styles.modalTitle}>Nova pasta</Text>
@@ -4797,7 +4947,7 @@ function CollaborationScreen({
       <Modal animationType="slide" onRequestClose={closeInviteModal} transparent visible={isInviteModalVisible}>
         <KeyboardAvoidingView behavior="height" keyboardVerticalOffset={0} style={styles.modalKeyboardAvoiding}>
           <View style={styles.modalOverlay}>
-            <View style={styles.modalSheet}>
+            <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
               <View style={styles.folderModalContent}>
                 <View style={styles.rowBetween}>
                   <Text style={styles.modalTitle}>Convidar membro</Text>
@@ -4827,7 +4977,7 @@ function CollaborationScreen({
       <Modal animationType="slide" onRequestClose={closeAssistantModal} transparent visible={isAssistantModalVisible}>
         <KeyboardAvoidingView behavior="height" keyboardVerticalOffset={0} style={styles.modalKeyboardAvoiding}>
           <View style={styles.modalOverlay}>
-            <View style={styles.modalSheet}>
+            <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
               <ScrollView contentContainerStyle={styles.modalSheetContent} keyboardShouldPersistTaps="handled">
                 <View style={styles.rowBetween}>
                   <Text style={styles.modalTitle}>Assistente de planejamento</Text>
@@ -4872,7 +5022,7 @@ function CollaborationScreen({
       >
         <KeyboardAvoidingView behavior="height" keyboardVerticalOffset={0} style={styles.modalKeyboardAvoiding}>
           <View style={styles.modalOverlay}>
-            <View style={styles.modalSheet}>
+            <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
               <View style={styles.folderModalContent}>
                 <View style={styles.rowBetween}>
                   <Text style={styles.modalTitle}>Editar item</Text>
@@ -4903,7 +5053,7 @@ function CollaborationScreen({
       <Modal animationType="slide" onRequestClose={closeNoteModal} transparent visible={Boolean(editingNote)}>
         <KeyboardAvoidingView behavior="height" keyboardVerticalOffset={0} style={styles.modalKeyboardAvoiding}>
           <View style={styles.modalOverlay}>
-            <View style={styles.modalSheet}>
+            <View style={[styles.modalSheet, { paddingBottom: spacing.xl + insets.bottom }]}>
               <View style={styles.folderModalContent}>
                 <View style={styles.rowBetween}>
                   <Text style={styles.modalTitle}>Editar nota</Text>
@@ -5405,6 +5555,27 @@ function confirmDeleteTask(task: Task, deleteTask: (task: Task) => Promise<void>
       },
     },
   ]);
+}
+
+function confirmDeleteTaskCategory(
+  category: TaskCategory,
+  taskCount: number,
+  deleteCategory: (category: TaskCategory) => Promise<boolean>,
+) {
+  Alert.alert(
+    'Excluir categoria?',
+    `Esta acao remove a categoria e ${taskCount} tarefa(s).`,
+    [
+      { text: 'Cancelar', style: 'cancel' },
+      {
+        text: 'Excluir',
+        style: 'destructive',
+        onPress: async () => {
+          await deleteCategory(category);
+        },
+      },
+    ],
+  );
 }
 
 function confirmDeleteFolder(folder: WorkspaceFolder, deleteWorkspaceFolder: (folder: WorkspaceFolder) => Promise<boolean>) {
@@ -6392,6 +6563,54 @@ function makeStyles(colors: AppColors) {
   taskFilterPanel: {
     gap: spacing.sm,
   },
+  categorySelectField: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 54,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  categorySelectLabel: {
+    color: colors.muted,
+    fontFamily: fontFamily.bold,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  categorySelectValue: {
+    color: colors.text,
+    fontFamily: fontFamily.extraBold,
+    fontSize: typography.body,
+    fontWeight: '800',
+  },
+  categorySelectDropdown: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  categorySelectOption: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minHeight: 46,
+    paddingHorizontal: spacing.md,
+  },
+  categorySelectOptionText: {
+    color: colors.text,
+    flex: 1,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
+  },
+  categorySelectOptionTextActive: {
+    color: colors.primary,
+  },
   categoryCreateButton: {
     alignItems: 'center',
     backgroundColor: colors.surfaceMuted,
@@ -6413,28 +6632,55 @@ function makeStyles(colors: AppColors) {
     gap: spacing.md,
     position: 'relative',
   },
+  taskCategoryBlockMenuOpen: {
+    elevation: 24,
+    zIndex: 300,
+  },
   taskCategoryHeader: {
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
+    overflow: 'visible',
+    position: 'relative',
+    zIndex: 90,
   },
   taskCategoryTitleWrap: {
     alignItems: 'center',
+    flex: 1,
     flexDirection: 'row',
     gap: spacing.sm,
   },
-  taskCategoryIcon: {
-    color: colors.primary,
-    fontFamily: fontFamily.black,
-    fontSize: typography.body,
-    fontWeight: '900',
-    width: 22,
+  taskCategoryDot: {
+    backgroundColor: colors.primary,
+    borderRadius: 4,
+    height: 8,
+    width: 8,
   },
   taskCategoryTitle: {
     color: colors.text,
+    flexShrink: 1,
     fontFamily: fontFamily.black,
     fontSize: 22,
     fontWeight: '900',
+  },
+  taskCategoryHeaderActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    overflow: 'visible',
+    position: 'relative',
+    zIndex: 91,
+  },
+  categoryActionWrap: {
+    elevation: 25,
+    overflow: 'visible',
+    position: 'relative',
+    zIndex: 302,
+  },
+  categoryActionMenu: {
+    elevation: 26,
+    minWidth: 164,
+    zIndex: 303,
   },
   taskCountBadge: {
     backgroundColor: colors.surfaceMuted,

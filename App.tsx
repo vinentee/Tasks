@@ -9,7 +9,7 @@ export default function App() {
   return (
     <>
       <RootApp />
-      <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
+      <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} translucent={false} />
     </>
   );
 }
