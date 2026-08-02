@@ -4545,7 +4545,7 @@ function buildTaskDueAt(date: Date | null, hasTime: boolean) {
 
   const dueAt = new Date(date);
   if (!hasTime) {
-    dueAt.setHours(12, 0, 0, 0);
+    dueAt.setHours(23, 59, 0, 0);
   }
 
   return dueAt.toISOString();
