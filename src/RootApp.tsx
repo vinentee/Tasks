@@ -721,7 +721,7 @@ function MainApp({ user }: { user: UserContext }) {
     ]);
 
     if (!habitResult.error) {
-      setHabits(habitResult.data ?? []);
+      setHabits(normalizeHabits(habitResult.data ?? []));
     }
     if (!checkInResult.error) {
       setHabitCheckIns(checkInResult.data ?? []);
@@ -868,7 +868,7 @@ function MainApp({ user }: { user: UserContext }) {
     setLists(listResult.data ?? []);
     setReminders(reminderResult.data ?? []);
     setTaskNotificationRules(taskNotificationResult.data ?? []);
-    setHabits(habitResult.data ?? []);
+    setHabits(normalizeHabits(habitResult.data ?? []));
     setHabitCheckIns(habitCheckInResult.data ?? []);
 
     const memberIds = Array.from(
@@ -6733,7 +6733,7 @@ function calculateHabitStreak(habits: Habit[], habitCheckIns: HabitCheckIn[]) {
   let streak = 0;
   const cursor = new Date();
 
-  while (streak < 365) {
+  for (let checkedDays = 0; checkedDays < 365; checkedDays += 1) {
     const expectedHabits = getHabitsForDate(habits, habitCheckIns, cursor);
     if (!expectedHabits.length) {
       cursor.setDate(cursor.getDate() - 1);
@@ -6753,6 +6753,14 @@ function calculateHabitStreak(habits: Habit[], habitCheckIns: HabitCheckIn[]) {
   }
 
   return streak;
+}
+
+function normalizeHabits(habits: Habit[]) {
+  return habits.map((habit) => ({
+    ...habit,
+    weekdays: normalizeHabitWeekdays(Array.isArray(habit.weekdays) ? habit.weekdays : []),
+    reminder_notification_ids: Array.isArray(habit.reminder_notification_ids) ? habit.reminder_notification_ids : [],
+  }));
 }
 
 function normalizeHabitTitle(title: string) {
