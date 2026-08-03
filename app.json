@@ -1,16 +1,16 @@
 {
   "expo": {
-    "name": "my-tasks",
+    "name": "Flow",
     "slug": "my-tasks",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/flow-logo.png",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/flow-logo.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#202528"
     },
     "ios": {
       "supportsTablet": true
@@ -18,14 +18,14 @@
     "android": {
       "package": "com.pdp.tasks",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "foregroundImage": "./assets/flow-logo.png",
+        "backgroundColor": "#202528"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/flow-favicon.png"
     },
     "plugins": [
       "expo-sqlite",

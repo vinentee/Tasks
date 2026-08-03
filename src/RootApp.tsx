@@ -35,6 +35,7 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -112,6 +113,8 @@ import type {
   WorkspaceInvitation,
   WorkspaceMember,
 } from './types/domain';
+
+const flowLogo = require('../assets/flow-logo.png');
 
 type MainTabKey = 'home' | 'tasks' | 'habits' | 'notes' | 'calendar';
 type TabKey = MainTabKey | 'profile';
@@ -534,7 +537,14 @@ function AuthScreen() {
     <SafeAreaView edges={['bottom', 'left', 'right', 'top']} style={styles.safe}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
         <ScrollView contentContainerStyle={styles.authContent}>
-          <Text style={textStyles.title}>Tasks</Text>
+          <Image
+            accessibilityLabel="Logo do Flow"
+            accessibilityIgnoresInvertColors
+            resizeMode="contain"
+            source={flowLogo}
+            style={styles.authLogo}
+          />
+          <Text style={textStyles.title}>Flow</Text>
           <Text style={styles.lead}>Organize prioridades, checklists e pastas de planos.</Text>
 
           <Card>
@@ -3719,9 +3729,8 @@ function PriorityBadge({ priority }: { priority: Priority }) {
   );
 }
 
-function AppHeader({ onOpenProfile, user }: { onOpenProfile: () => void; user: UserContext }) {
+function AppHeader({ onOpenProfile }: { onOpenProfile: () => void; user: UserContext }) {
   const { styles } = useAppStyles();
-  const firstName = getFirstName(user);
 
   return (
     <View style={styles.brandHeader}>
@@ -3732,9 +3741,14 @@ function AppHeader({ onOpenProfile, user }: { onOpenProfile: () => void; user: U
           onPress={onOpenProfile}
           style={({ pressed }) => [styles.avatar, pressed && styles.pressed]}
         >
-          <Text style={styles.avatarText}>{firstName.slice(0, 1).toUpperCase()}</Text>
+          <Image
+            accessibilityIgnoresInvertColors
+            resizeMode="cover"
+            source={flowLogo}
+            style={styles.headerLogo}
+          />
         </Pressable>
-        <Text style={styles.brandName}>Tasks</Text>
+        <Text style={styles.brandName}>Flow</Text>
       </View>
     </View>
   );
@@ -7679,6 +7693,11 @@ function makeStyles(colors: AppColors) {
     gap: spacing.xl,
     padding: spacing.xl,
   },
+  authLogo: {
+    alignSelf: 'center',
+    height: 108,
+    width: 108,
+  },
   loadingDot: {
     alignSelf: 'center',
     marginBottom: spacing.md,
@@ -7704,19 +7723,18 @@ function makeStyles(colors: AppColors) {
   },
   avatar: {
     alignItems: 'center',
-    backgroundColor: colors.primarySoft,
-    borderColor: colors.primary,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
     borderRadius: 18,
     borderWidth: 1,
     height: 36,
     justifyContent: 'center',
+    overflow: 'hidden',
     width: 36,
   },
-  avatarText: {
-    color: colors.primary,
-    fontFamily: fontFamily.black,
-    fontSize: typography.body,
-    fontWeight: '900',
+  headerLogo: {
+    height: 36,
+    width: 36,
   },
   brandName: {
     color: colors.primary,
