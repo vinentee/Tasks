@@ -25,6 +25,7 @@ import {
   Pencil,
   Plus,
   Sparkles,
+  SendHorizontal,
   UserRound,
   WalletCards,
   type LucideIcon,
@@ -43,6 +44,7 @@ import {
   Text,
   Switch,
   View,
+  TextInput,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -80,6 +82,7 @@ import {
   scheduleTaskDeadlineNotifications,
   type TaskDeadlineNotificationInput,
 } from './services/notifications';
+import { askTaskAssistant } from './services/taskAssistant';
 import { fontFamily, isThemeKey, radius, spacing, themeOptions, typography, type AppColors, type ThemeKey } from './theme/tokens';
 import { ThemeProvider, useTheme } from './theme/theme-context';
 import type { ReceivedWorkspaceInvitation } from './types/database';
@@ -162,6 +165,11 @@ type SmartPlanDraft = {
   folderName: string;
   reminders: Array<{ remindAt: string; title: string }>;
   sections: SmartPlanSectionDraft[];
+};
+type TaskAssistantMessage = {
+  id: string;
+  role: 'assistant' | 'user';
+  text: string;
 };
 
 type AppStyleBundle = ReturnType<typeof useAppStyles>;
@@ -2925,7 +2933,17 @@ function HomeScreen({
   tasks: Task[];
   user: UserContext;
 }) {
-  const { styles } = useAppStyles();
+  const { colors, styles } = useAppStyles();
+  const [assistantInput, setAssistantInput] = useState('');
+  const [assistantMessages, setAssistantMessages] = useState<TaskAssistantMessage[]>([
+    {
+      id: 'assistant-welcome',
+      role: 'assistant',
+      text: 'Oi! Pergunte sobre suas tarefas de hoje, urgentes ou pendentes.',
+    },
+  ]);
+  const [assistantError, setAssistantError] = useState<string | null>(null);
+  const [isAssistantLoading, setIsAssistantLoading] = useState(false);
   const todayTasks = tasks.filter((task) => isToday(task.due_at));
   const doneToday = todayTasks.filter((task) => task.status === 'done').length;
   const totalToday = todayTasks.length;
@@ -2936,6 +2954,39 @@ function HomeScreen({
     .slice(0, 3);
   const upcomingReminders = reminders.filter((reminder) => !reminder.is_done).filter((reminder) => isFuture(reminder.remind_at));
   const firstName = getFirstName(user);
+  const submitAssistantQuestion = async () => {
+    const question = assistantInput.trim();
+    if (!question || isAssistantLoading) {
+      return;
+    }
+
+    const userMessage: TaskAssistantMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      text: question,
+    };
+
+    setAssistantMessages((current) => [...current, userMessage]);
+    setAssistantInput('');
+    setAssistantError(null);
+    setIsAssistantLoading(true);
+
+    try {
+      const response = supabase
+        ? await askTaskAssistant(question)
+        : { answer: buildLocalTaskAssistantAnswer(question, tasks) };
+      const assistantMessage: TaskAssistantMessage = {
+        id: `assistant-${Date.now()}`,
+        role: 'assistant',
+        text: response.answer,
+      };
+      setAssistantMessages((current) => [...current, assistantMessage]);
+    } catch (error) {
+      setAssistantError(error instanceof Error ? error.message : 'Nao foi possivel consultar o assistente.');
+    } finally {
+      setIsAssistantLoading(false);
+    }
+  };
 
   return (
     <View style={styles.homeStack}>
@@ -2986,6 +3037,72 @@ function HomeScreen({
             <Text style={styles.mutedText}>Crie tarefas com data de hoje para preencher esta lista.</Text>
           </View>
         )}
+      </View>
+
+      <View style={styles.assistantChatCard}>
+        <View style={styles.assistantChatHeader}>
+          <View style={styles.assistantChatIcon}>
+            <Sparkles color={colors.primary} size={18} strokeWidth={2.4} />
+          </View>
+          <View style={styles.assistantChatHeaderText}>
+            <Text style={styles.dashboardTitle}>Assistente</Text>
+            <Text style={styles.assistantChatSubtitle}>Consulte suas tarefas sem sair da Home.</Text>
+          </View>
+        </View>
+
+        <View style={styles.assistantMessages}>
+          {assistantMessages.map((message) => (
+            <View
+              key={message.id}
+              style={[
+                styles.assistantMessageBubble,
+                message.role === 'user' ? styles.assistantUserMessage : styles.assistantBotMessage,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.assistantMessageText,
+                  message.role === 'user' ? styles.assistantUserMessageText : styles.assistantBotMessageText,
+                ]}
+              >
+                {message.text}
+              </Text>
+            </View>
+          ))}
+          {isAssistantLoading ? (
+            <View style={[styles.assistantMessageBubble, styles.assistantBotMessage]}>
+              <ActivityIndicator color={colors.primary} size="small" />
+            </View>
+          ) : null}
+        </View>
+
+        {assistantError ? <Text style={styles.assistantErrorText}>{assistantError}</Text> : null}
+
+        <View style={styles.assistantInputRow}>
+          <TextInput
+            accessibilityLabel="Pergunta para o assistente"
+            editable={!isAssistantLoading}
+            onChangeText={setAssistantInput}
+            onSubmitEditing={submitAssistantQuestion}
+            placeholder="Pergunte sobre suas tarefas..."
+            placeholderTextColor={colors.muted}
+            returnKeyType="send"
+            style={styles.assistantInput}
+            value={assistantInput}
+          />
+          <Pressable
+            accessibilityRole="button"
+            disabled={!assistantInput.trim() || isAssistantLoading}
+            onPress={submitAssistantQuestion}
+            style={({ pressed }) => [
+              styles.assistantSendButton,
+              (!assistantInput.trim() || isAssistantLoading) && styles.disabled,
+              pressed && assistantInput.trim() && !isAssistantLoading && styles.pressed,
+            ]}
+          >
+            <SendHorizontal color={colors.surface} size={18} strokeWidth={2.5} />
+          </Pressable>
+        </View>
       </View>
 
       {/* <View style={styles.insightCard}>
@@ -7460,6 +7577,80 @@ function formatRelativeTime(value: string) {
   return `Ha ${Math.round(diffMinutes / 60)} h`;
 }
 
+function buildLocalTaskAssistantAnswer(question: string, tasks: Task[]) {
+  const normalizedQuestion = normalizeAssistantText(question);
+  const openTasks = tasks.filter((task) => task.status !== 'done');
+  const isTodayQuestion = normalizedQuestion.includes('hoje');
+  const isUrgentQuestion = normalizedQuestion.includes('urgente') || normalizedQuestion.includes('prioridade');
+  const isPendingQuestion =
+    normalizedQuestion.includes('pendente') ||
+    normalizedQuestion.includes('aberta') ||
+    normalizedQuestion.includes('aberto') ||
+    normalizedQuestion.includes('fazer');
+  const isLateQuestion =
+    normalizedQuestion.includes('atrasada') ||
+    normalizedQuestion.includes('atrasado') ||
+    normalizedQuestion.includes('vencida') ||
+    normalizedQuestion.includes('vencido');
+
+  if (isTodayQuestion) {
+    return formatAssistantTaskList(
+      'Estas sao suas tarefas abertas para hoje:',
+      openTasks.filter((task) => isToday(task.due_at)).sort(sortTasksByPriorityAndTime),
+      'Voce nao tem tarefas abertas para hoje.',
+    );
+  }
+
+  if (isUrgentQuestion) {
+    return formatAssistantTaskList(
+      'Estas sao suas tarefas urgentes:',
+      openTasks.filter((task) => task.priority === 'urgent').sort(sortTasksByPriorityAndTime),
+      'Voce nao tem tarefas urgentes abertas.',
+    );
+  }
+
+  if (isLateQuestion) {
+    return formatAssistantTaskList(
+      'Estas tarefas estao atrasadas:',
+      openTasks.filter((task) => task.due_at && dateValue(task.due_at) < Date.now()).sort(sortTasksByPriorityAndTime),
+      'Voce nao tem tarefas atrasadas.',
+    );
+  }
+
+  if (isPendingQuestion) {
+    return formatAssistantTaskList(
+      'Estas sao suas tarefas pendentes:',
+      openTasks.sort(sortTasksByPriorityAndTime),
+      'Voce nao tem tarefas pendentes.',
+    );
+  }
+
+  return 'No modo demo eu consigo responder sobre tarefas de hoje, urgentes, pendentes ou atrasadas. Com Supabase configurado, eu uso a OpenAI para entender perguntas mais livres.';
+}
+
+function formatAssistantTaskList(title: string, tasks: Task[], emptyText: string) {
+  if (!tasks.length) {
+    return emptyText;
+  }
+
+  const taskLines = tasks.slice(0, 8).map((task, index) => {
+    const dueLabel = task.due_at ? ` - ${formatTaskDueLabel(task.due_at)}` : '';
+    return `${index + 1}. ${task.title} (${priorityLabels[task.priority]}, ${statusLabels[task.status]}${dueLabel})`;
+  });
+  const hiddenCount = tasks.length - taskLines.length;
+
+  return [title, ...taskLines, hiddenCount > 0 ? `E mais ${hiddenCount} tarefa(s).` : null]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function normalizeAssistantText(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
 function makeStyles(colors: AppColors) {
   return StyleSheet.create({
   safe: {
@@ -8919,6 +9110,103 @@ function makeStyles(colors: AppColors) {
     gap: spacing.xs,
     padding: spacing.lg,
   },
+  assistantChatCard: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    gap: spacing.lg,
+    padding: spacing.lg,
+    shadowColor: colors.shadow,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.06,
+    shadowRadius: 16,
+  },
+  assistantChatHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  assistantChatIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.primarySoft,
+    borderRadius: 20,
+    height: 40,
+    justifyContent: 'center',
+    width: 40,
+  },
+  assistantChatHeaderText: {
+    flex: 1,
+    gap: spacing.xs,
+  },
+  assistantChatSubtitle: {
+    color: colors.muted,
+    fontFamily: fontFamily.regular,
+    fontSize: typography.small,
+    lineHeight: 18,
+  },
+  assistantMessages: {
+    gap: spacing.sm,
+  },
+  assistantMessageBubble: {
+    borderRadius: radius.md,
+    maxWidth: '92%',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  assistantBotMessage: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.surfaceMuted,
+  },
+  assistantUserMessage: {
+    alignSelf: 'flex-end',
+    backgroundColor: colors.primary,
+  },
+  assistantMessageText: {
+    fontFamily: fontFamily.medium,
+    fontSize: typography.small,
+    fontWeight: '500',
+    lineHeight: 18,
+  },
+  assistantBotMessageText: {
+    color: colors.text,
+  },
+  assistantUserMessageText: {
+    color: colors.surface,
+  },
+  assistantErrorText: {
+    color: colors.danger,
+    fontFamily: fontFamily.bold,
+    fontSize: typography.small,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  assistantInputRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  assistantInput: {
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    color: colors.text,
+    flex: 1,
+    fontFamily: fontFamily.regular,
+    fontSize: typography.body,
+    minHeight: 44,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  assistantSendButton: {
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
   priorityCard: {
     alignItems: 'center',
     backgroundColor: colors.surfaceMuted,
@@ -9722,6 +10010,9 @@ function makeStyles(colors: AppColors) {
   },
   pressed: {
     opacity: 0.78,
+  },
+  disabled: {
+    opacity: 0.5,
   },
   });
 }

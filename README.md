@@ -27,6 +27,13 @@ npx supabase migration list
 npx -p node@20 node ./node_modules/expo/bin/cli start --clear --host localhost --port 8081
 ```
 
+5. To enable the Home chatbot, configure the OpenAI key as a Supabase Edge Function secret and deploy the function:
+
+```sh
+npx supabase secrets set OPENAI_API_KEY=your-openai-api-key
+npx supabase functions deploy task-assistant
+```
+
 Without Supabase env vars, the app opens in demo mode so the module structure can be reviewed before the backend is connected.
 
 ## Current Modules
