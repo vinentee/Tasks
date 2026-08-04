@@ -4,11 +4,11 @@
     "slug": "my-tasks",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/flow-logo.png",
+    "icon": "./assets/flow-mark-icon.png",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/flow-logo.png",
+      "image": "./assets/flow-mark-native.png",
       "resizeMode": "contain",
       "backgroundColor": "#202528"
     },
@@ -18,14 +18,14 @@
     "android": {
       "package": "com.pdp.tasks",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/flow-logo.png",
+        "foregroundImage": "./assets/flow-mark-native.png",
         "backgroundColor": "#202528"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/flow-favicon.png"
+      "favicon": "./assets/flow-mark-favicon.png"
     },
     "plugins": [
       "expo-sqlite",

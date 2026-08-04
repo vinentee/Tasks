@@ -35,7 +35,6 @@ import {
   ActivityIndicator,
   Alert,
   AppState,
-  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -50,6 +49,7 @@ import {
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button, Card, Field, Pill, SectionTitle, useTextStyles } from './components/ui';
+import { FlowLogoMark } from './components/FlowLogoMark';
 import {
   demoChecklistItems,
   demoHabitCheckIns,
@@ -113,8 +113,6 @@ import type {
   WorkspaceInvitation,
   WorkspaceMember,
 } from './types/domain';
-
-const flowLogo = require('../assets/flow-logo.png');
 
 type MainTabKey = 'home' | 'tasks' | 'habits' | 'notes' | 'calendar';
 type TabKey = MainTabKey | 'profile';
@@ -497,7 +495,7 @@ function RootAppContent() {
 }
 
 function AuthScreen() {
-  const { colors, styles, textStyles } = useAppStyles();
+  const { colors, styles } = useAppStyles();
   const [mode, setMode] = useState<'signIn' | 'signUp'>('signIn');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -537,18 +535,11 @@ function AuthScreen() {
     <SafeAreaView edges={['bottom', 'left', 'right', 'top']} style={styles.safe}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.flex}>
         <ScrollView contentContainerStyle={styles.authContent}>
-          <Image
-            accessibilityLabel="Logo do Flow"
-            accessibilityIgnoresInvertColors
-            resizeMode="contain"
-            source={flowLogo}
-            style={styles.authLogo}
-          />
-          <Text style={textStyles.title}>Flow</Text>
+          <FlowLogoMark color={colors.primary} size={156} style={styles.authLogo} />
           <Text style={styles.lead}>Organize prioridades, checklists e pastas de planos.</Text>
 
           <Card>
-            <SectionTitle muted="Supabase Auth">Acesso</SectionTitle>
+            <SectionTitle muted="Faça o login ou crie sua conta">Acesso</SectionTitle>
             {mode === 'signUp' ? (
               <Field autoCapitalize="words" onChangeText={setName} placeholder="Nome" value={name} />
             ) : null}
@@ -3730,7 +3721,7 @@ function PriorityBadge({ priority }: { priority: Priority }) {
 }
 
 function AppHeader({ onOpenProfile }: { onOpenProfile: () => void; user: UserContext }) {
-  const { styles } = useAppStyles();
+  const { colors, styles } = useAppStyles();
 
   return (
     <View style={styles.brandHeader}>
@@ -3741,14 +3732,8 @@ function AppHeader({ onOpenProfile }: { onOpenProfile: () => void; user: UserCon
           onPress={onOpenProfile}
           style={({ pressed }) => [styles.avatar, pressed && styles.pressed]}
         >
-          <Image
-            accessibilityIgnoresInvertColors
-            resizeMode="cover"
-            source={flowLogo}
-            style={styles.headerLogo}
-          />
+          <FlowLogoMark color={colors.primary} size={30} />
         </Pressable>
-        <Text style={styles.brandName}>Flow</Text>
       </View>
     </View>
   );
@@ -7695,8 +7680,6 @@ function makeStyles(colors: AppColors) {
   },
   authLogo: {
     alignSelf: 'center',
-    height: 108,
-    width: 108,
   },
   loadingDot: {
     alignSelf: 'center',
@@ -7731,16 +7714,6 @@ function makeStyles(colors: AppColors) {
     justifyContent: 'center',
     overflow: 'hidden',
     width: 36,
-  },
-  headerLogo: {
-    height: 36,
-    width: 36,
-  },
-  brandName: {
-    color: colors.primary,
-    fontFamily: fontFamily.black,
-    fontSize: 18,
-    fontWeight: '900',
   },
   profileHero: {
     alignItems: 'center',
